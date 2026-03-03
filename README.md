@@ -9,7 +9,7 @@ Quick start (mobile): [QUICK_START_CARD.md](QUICK_START_CARD.md)
 
 ## Key Features
 
-- **👁️ Real-time Sensor Monitoring**: Temperature, pH, and Glucose level readings via NFC
+- **👁️ Real-time Sensor Monitoring**: Temperature (0–60 °C), pH (0–14), and Glucose (30–250 mg/dL) readings via NFC
 - **💾 Data Storage**: Automatic CSV file storage with daily rotation
 - **📊 Data Visualization**: Interactive graphs and charts for all sensor parameters
 - **📱 Dashboard**: Live display of current sensor readings with progress indicators
@@ -132,14 +132,14 @@ The compiled APK will be in `bin/` directory.
 ### CSV Format
 ```
 timestamp,temperature,ph,glucose
-2024-02-10T10:30:45.123456,36.5,7.2,95.0
-2024-02-10T10:30:50.234567,36.6,7.1,94.5
+2024-02-10T10:30:45.123456,40.0,7.2,140.0
+2024-02-10T10:30:50.234567,41.3,6.8,135.5
 ```
 
 ### Sensor Data Protocol (NHS 3152)
-- Temperature: 16-bit signed integer (0.1°C units)
-- pH: 16-bit unsigned integer (0.01 pH units)
-- Glucose: 16-bit unsigned integer (mg/dL)
+- Temperature: 16-bit signed integer (0.1°C units) — range 0–60 °C
+- pH: 16-bit unsigned integer (0.01 pH units) — range 0–14
+- Glucose: 16-bit unsigned integer (mg/dL) — range 30–250 mg/dL
 
 ## NFC Communication
 
@@ -224,7 +224,7 @@ stats = sensor_data.get_statistics()
 ### CSVHandler
 ```python
 csv = CSVHandler('./data')
-csv.save_sensor_reading({'temperature': 36.5, 'ph': 7.0, 'glucose': 100})
+csv.save_sensor_reading({'temperature': 40.0, 'ph': 7.0, 'glucose': 140})
 readings = csv.load_all_readings()
 csv.export_all_data(readings, 'export.csv')
 ```

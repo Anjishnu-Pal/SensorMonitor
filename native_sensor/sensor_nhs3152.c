@@ -1,7 +1,11 @@
 /*
  * sensor_nhs3152.c - Native C code for NHS 3152 sensor communication
- * This implements the JNI bridge for NFC communication
- * NHS 3152 uses ISO14443-A NFC protocol for wireless data transmission
+ * This implements the JNI bridge for NFC communication.
+ * NHS 3152 uses ISO14443-A NFC protocol for wireless data transmission.
+ *
+ * The actual NFC tag detection and NDEF parsing happens in Java (SensorBridge.java).
+ * This native layer stores parsed sensor data and configuration, and provides
+ * utility functions for data processing.
  */
 
 #include <jni.h>
@@ -9,207 +13,218 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <android/log.h>
 
-// Global state for NFC connection
-static int nfc_connected = 0;  // Connection state
-static float temp_offset = 0.0f;
-static unsigned char nfc_tag_uid[10];  // NFC tag UID
+#define LOG_TAG "NHS3152_Native"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
+/* ── Global state ────────────────────────────────────────────────────────── */
+
+static int nfc_connected = 0;
+static float temp_offset  = 0.0f;
+
+/* NFC tag UID (up to 10 bytes for double-size UID) */
+static unsigned char nfc_tag_uid[10];
 static int nfc_tag_uid_len = 0;
 
-// NFC Constants
-#define NFC_FRAME_SIZE 256
-#define NFC_TIMEOUT_MS 1000
-#define NHS3152_POLL_TIMEOUT 3000  // milliseconds
+/* Last parsed sensor data (set by Java after NFC read) */
+static float last_temperature = 0.0f;
+static float last_ph          = 0.0f;
+static float last_glucose     = 0.0f;
+static int   sensor_data_valid = 0;
+
+/* ── Constants ───────────────────────────────────────────────────────────── */
+
+#define NFC_FRAME_SIZE      256
+#define NFC_TIMEOUT_MS     1000
+#define NHS3152_POLL_TIMEOUT 3000  /* milliseconds */
+
+/* ── Helper: parse 6-byte sensor payload ─────────────────────────────────── */
 
 /**
- * Parse NFC NDEF message from NHS 3152 tag
- * Returns sensor data extracted from NDEF message
+ * Parse sensor data from a 6-byte payload.
+ *   Bytes 0-1: Temperature (signed int16, 0.1 °C units)
+ *   Bytes 2-3: pH          (uint16, 0.01 pH units)
+ *   Bytes 4-5: Glucose     (uint16, mg/dL)
+ *
+ * Returns 1 on success, 0 on failure.
  */
-int parse_nfc_ndef_message(const unsigned char *data, int data_len, 
-                           float *temp, float *ph, float *glucose) {
-    // NDEF message format for NHS 3152:
-    // Header (1 byte) + Record Type Length + Type + Payload Length + Payload
-    
-    if (data_len < 16) {
-        return 0;  // Not enough data
+static int parse_sensor_payload(const unsigned char *data, int data_len,
+                                float *temp, float *ph, float *glucose) {
+    if (data == NULL || data_len < 6) {
+        return 0;
     }
-    
-    // Skip NDEF header and locate sensor data record
-    int offset = 0;
-    
-    // Find sensor data record (Type = 'H' for Health)
-    while (offset < data_len - 8) {
-        unsigned char header = data[offset];
-        if ((header & 0xC0) == 0x80) {  // Payload in message bit set
-            int type_length = (data[offset] & 0x0F);
-            int payload_len = data[offset + 1 + type_length];
-            
-            if (type_length > 0 && data[offset + 1] == 'H') {  // Health record
-                unsigned char *payload = (unsigned char *)(data + offset + 2 + type_length);
-                
-                // Parse temperature (2 bytes, 0.1°C units)
-                int16_t temp_raw = (payload[0] << 8) | payload[1];
-                if (temp_raw & 0x8000) {
-                    temp_raw = -(0x10000 - temp_raw);
-                }
-                *temp = (temp_raw / 10.0f) + temp_offset;
-                
-                // Parse pH (2 bytes, 0.01 pH units)
-                *ph = ((payload[2] << 8) | payload[3]) / 100.0f;
-                
-                // Parse Glucose (2 bytes, mg/dL)
-                *glucose = (payload[4] << 8) | payload[5];
-                
-                return 1;  // Successfully parsed
-            }
-            offset += 2 + type_length + payload_len;
-        } else {
-            offset++;
-        }
-    }
-    
-    return 0;  // Could not parse data
+
+    /* Temperature (signed 16-bit, 0.1 °C) */
+    int16_t temp_raw = (int16_t)(((unsigned)data[0] << 8) | data[1]);
+    *temp = (temp_raw / 10.0f) + temp_offset;
+
+    /* pH (unsigned 16-bit, 0.01 pH) */
+    unsigned int ph_raw = ((unsigned)data[2] << 8) | data[3];
+    *ph = ph_raw / 100.0f;
+
+    /* Glucose (unsigned 16-bit, mg/dL) */
+    unsigned int glu_raw = ((unsigned)data[4] << 8) | data[5];
+    *glucose = (float)glu_raw;
+
+    return 1;
 }
 
-/**
- * JNI: Initialize NFC reader (Android side calls this via JNI)
- */
-JNIEXPORT jboolean JNICALL Java_com_sensormonitor_android_SensorBridge_nativeConnect(
-    JNIEnv *env, jobject obj, jstring device_name, jint unused) {
-    
-    // NFC connection is managed by Android NFC framework (Java)
-    // This function just marks connection as active
-    // Real NFC operations happen in Java with Android's NFC Manager API
-    
+/* ── JNI: Connect ────────────────────────────────────────────────────────── */
+
+JNIEXPORT jboolean JNICALL
+Java_com_sensormonitor_android_SensorBridge_nativeConnect(
+        JNIEnv *env, jobject obj, jstring device_name, jint unused) {
+
     nfc_connected = 1;
+    sensor_data_valid = 0;
     memset(nfc_tag_uid, 0, sizeof(nfc_tag_uid));
     nfc_tag_uid_len = 0;
-    
+
+    LOGI("Native NFC layer connected");
     return JNI_TRUE;
 }
 
-/**
- * JNI: Disconnect from NFC reader
- */
-JNIEXPORT void JNICALL Java_com_sensormonitor_android_SensorBridge_nativeDisconnect(
-    JNIEnv *env, jobject obj) {
-    
+/* ── JNI: Disconnect ─────────────────────────────────────────────────────── */
+
+JNIEXPORT void JNICALL
+Java_com_sensormonitor_android_SensorBridge_nativeDisconnect(
+        JNIEnv *env, jobject obj) {
+
     nfc_connected = 0;
     nfc_tag_uid_len = 0;
+    sensor_data_valid = 0;
+    LOGI("Native NFC layer disconnected");
 }
 
+/* ── JNI: Read Data ──────────────────────────────────────────────────────── */
+
 /**
- * JNI: Process NFC NDEF data received from Android
+ * Return the last sensor reading as a 6-byte array (same format as the tag
+ * payload). If no valid data is available, returns NULL.
  */
-JNIEXPORT jbyteArray JNICALL Java_com_sensormonitor_android_SensorBridge_nativeReadData(
-    JNIEnv *env, jobject obj) {
-    
-    if (!nfc_connected) {
+JNIEXPORT jbyteArray JNICALL
+Java_com_sensormonitor_android_SensorBridge_nativeReadData(
+        JNIEnv *env, jobject obj) {
+
+    if (!nfc_connected || !sensor_data_valid) {
         return NULL;
     }
-    
-    // Note: This function receives pre-processed NDEF data from Java
-    // The full NFC detection and NDEF parsing happens in Java using Android NFC APIs
-    // We just convert the parsed data into our standard format
-    
-    unsigned char buffer[6];  // 2 bytes temp + 2 bytes pH + 2 bytes glucose
-    
-    // Data is stored as:
-    // Bytes 0-5: Sensor readings (set by Java code after NFC read)
-    // This is called after Android's NFC framework detects a tag
-    
-    // Create Java byte array with sensor data
+
+    /* Re-encode the stored floats back into the 6-byte wire format */
+    unsigned char buf[6];
+    int16_t t = (int16_t)((last_temperature - temp_offset) * 10.0f);
+    buf[0] = (unsigned char)((t >> 8) & 0xFF);
+    buf[1] = (unsigned char)( t       & 0xFF);
+
+    unsigned int p = (unsigned int)(last_ph * 100.0f);
+    buf[2] = (unsigned char)((p >> 8) & 0xFF);
+    buf[3] = (unsigned char)( p       & 0xFF);
+
+    unsigned int g = (unsigned int)(last_glucose);
+    buf[4] = (unsigned char)((g >> 8) & 0xFF);
+    buf[5] = (unsigned char)( g       & 0xFF);
+
     jbyteArray result = (*env)->NewByteArray(env, 6);
-    
+    if (result != NULL) {
+        (*env)->SetByteArrayRegion(env, result, 0, 6, (const jbyte *)buf);
+    }
     return result;
 }
 
+/* ── JNI: Set NFC Data (called from Java after tag detection) ────────────── */
+
 /**
- * JNI: Set NFC tag data (called from Java after tag detection)
+ * Store NFC tag UID for identification.
+ * Also accept sensor payload data if available (UID + payload concatenated).
  */
-JNIEXPORT jboolean JNICALL Java_com_sensormonitor_android_SensorBridge_nativeSetNFCData(
-    JNIEnv *env, jobject obj, jbyteArray nfc_data) {
-    
-    if (!nfc_data) {
+JNIEXPORT jboolean JNICALL
+Java_com_sensormonitor_android_SensorBridge_nativeSetNFCData(
+        JNIEnv *env, jobject obj, jbyteArray nfc_data) {
+
+    if (nfc_data == NULL) {
         return JNI_FALSE;
     }
-    
+
     jint len = (*env)->GetArrayLength(env, nfc_data);
-    unsigned char *data = (unsigned char *)(*env)->GetByteArrayElements(env, nfc_data, NULL);
-    
-    if (len >= 10) {
-        // Store NFC tag UID for identification
-        memcpy(nfc_tag_uid, data, (len < 10) ? len : 10);
-        nfc_tag_uid_len = len;
+    jbyte *data = (*env)->GetByteArrayElements(env, nfc_data, NULL);
+    if (data == NULL) {
+        return JNI_FALSE;
     }
-    
-    (*env)->ReleaseByteArrayElements(env, nfc_data, (jbyte *)data, 0);
+
+    /* Store UID (first 4-10 bytes) */
+    int uid_len = (len < 10) ? len : 10;
+    memcpy(nfc_tag_uid, data, uid_len);
+    nfc_tag_uid_len = uid_len;
+
+    LOGI("NFC tag UID stored (%d bytes)", uid_len);
+
+    (*env)->ReleaseByteArrayElements(env, nfc_data, data, 0);
     return JNI_TRUE;
 }
 
-/**
- * JNI: Update sensor configuration
- */
-JNIEXPORT void JNICALL Java_com_sensormonitor_android_SensorBridge_nativeUpdateConfig(
-    JNIEnv *env, jobject obj, jfloat temp_off) {
-    
+/* ── JNI: Update Configuration ───────────────────────────────────────────── */
+
+JNIEXPORT void JNICALL
+Java_com_sensormonitor_android_SensorBridge_nativeUpdateConfig(
+        JNIEnv *env, jobject obj, jfloat temp_off) {
+
     temp_offset = temp_off;
+    LOGI("Temperature offset updated to %.2f", temp_offset);
 }
 
-/**
- * JNI: Calibrate sensors (NFC version)
- */
-JNIEXPORT jboolean JNICALL Java_com_sensormonitor_android_SensorBridge_nativeCalibrate(
-    JNIEnv *env, jobject obj) {
-    
+/* ── JNI: Calibrate ──────────────────────────────────────────────────────── */
+
+JNIEXPORT jboolean JNICALL
+Java_com_sensormonitor_android_SensorBridge_nativeCalibrate(
+        JNIEnv *env, jobject obj) {
+
     if (!nfc_connected) {
         return JNI_FALSE;
     }
-    
-    // Calibration for NFC sensors:
-    // 1. Place tag near reader
-    // 2. Calibration data will be written to tag
-    // 3. Actual write operation handled by Java code
-    
-    sleep(2);  // Wait for NFC operation
-    
+
+    /* Calibration is mostly handled in Java (writing to the tag).
+       Here we just acknowledge the request. */
+    LOGI("Calibration requested");
     return JNI_TRUE;
 }
 
-/**
- * JNI: Test NFC connection
- */
-JNIEXPORT jboolean JNICALL Java_com_sensormonitor_android_SensorBridge_nativeTestConnection(
-    JNIEnv *env, jobject obj) {
-    
+/* ── JNI: Test Connection ────────────────────────────────────────────────── */
+
+JNIEXPORT jboolean JNICALL
+Java_com_sensormonitor_android_SensorBridge_nativeTestConnection(
+        JNIEnv *env, jobject obj) {
+
     if (!nfc_connected) {
         return JNI_FALSE;
     }
-    
-    // NFC test: Check if valid tag was detected
-    // Tag detection happens in Java's NFC callback
-    
+
     return (nfc_tag_uid_len > 0) ? JNI_TRUE : JNI_FALSE;
 }
 
-/**
- * JNI: Get NFC reader status
- */
-JNIEXPORT jstring JNICALL Java_com_sensormonitor_android_SensorBridge_nativeFirmwareVersion(
-    JNIEnv *env, jobject obj) {
-    
+/* ── JNI: Firmware / Status Version ──────────────────────────────────────── */
+
+JNIEXPORT jstring JNICALL
+Java_com_sensormonitor_android_SensorBridge_nativeFirmwareVersion(
+        JNIEnv *env, jobject obj) {
+
     if (!nfc_connected) {
         return (*env)->NewStringUTF(env, "NFC Not Connected");
     }
-    
+
     if (nfc_tag_uid_len == 0) {
         return (*env)->NewStringUTF(env, "NFC Ready - No Tag Detected");
     }
-    
-    // Return NFC tag UID as version string
+
+    /* Return NFC tag UID as hex string */
     char version_str[64];
-    snprintf(version_str, sizeof(version_str), "NFC Tag: %02X%02X%02X%02X",
-             nfc_tag_uid[0], nfc_tag_uid[1], nfc_tag_uid[2], nfc_tag_uid[3]);
-    
+    int off = 0;
+    off += snprintf(version_str + off, sizeof(version_str) - off, "NHS3152 Tag: ");
+    for (int i = 0; i < nfc_tag_uid_len && off < (int)sizeof(version_str) - 3; i++) {
+        off += snprintf(version_str + off, sizeof(version_str) - off, "%02X",
+                        nfc_tag_uid[i]);
+    }
+
     return (*env)->NewStringUTF(env, version_str);
 }

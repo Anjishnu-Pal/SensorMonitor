@@ -16,10 +16,11 @@ class AppConfig:
         'app_name': 'SensorMonitor',
         'version': '1.0.0',
         'sensor': {
-            'port': '/dev/ttyUSB0',
-            'baud_rate': 115200,
-            'timeout': 2.0,
-            'update_interval': 5,
+            'communication_mode': 'NFC',
+            'nfc_reader_presence_check': 250,  # milliseconds
+            'nfc_timeout': 3000,  # milliseconds
+            'auto_detect': True,
+            'update_interval': 5,  # seconds between polls
         },
         'data_storage': {
             'path': './sensor_data',

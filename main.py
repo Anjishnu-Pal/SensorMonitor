@@ -1,7 +1,19 @@
 """
 SensorMonitor: Mobile App for Health Sensor Data Monitoring
-Monitors Temperature, pH, and Glucose levels using NHS 3152 sensors
+Monitors Temperature, pH, and Glucose levels using NHS 3152 sensors via NFC.
+Works on Android with real NFC hardware, or on desktop with mock data.
 """
+
+import os
+import sys
+import logging
+
+# Configure logging before anything else
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(name)s] %(levelname)s: %(message)s'
+)
+logger = logging.getLogger('SensorMonitor')
 
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
@@ -10,7 +22,6 @@ from kivy.uix.tabbedpanel import TabbedPanel, TabbedPanelItem
 from kivy.uix.label import Label
 from kivy.uix.button import Button
 from kivy.clock import Clock
-import threading
 
 from kivy_app.ui.main_screen import MainScreen
 from kivy_app.ui.dashboard import DashboardScreen
@@ -26,7 +37,7 @@ class SensorMonitorApp(App):
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.title = "SensorMonitor - Health Sensor Dashboard"
+        self.title = "SensorMonitor v1.02"
         self.sensor_interface = None
         self.csv_handler = None
         self.sensor_data = None
@@ -73,17 +84,29 @@ class SensorMonitorApp(App):
         )
         main_layout.add_widget(settings_tab)
         
-        # Schedule data updates
+        # Attempt initial NFC connection
+        Clock.schedule_once(self._initial_connect, 2)
+        
+        # Schedule periodic data updates
         self.data_update_event = Clock.schedule_interval(
-            self.update_sensor_data, 5  # Update every 5 seconds
+            self.update_sensor_data, 2  # Poll every 2 seconds for responsive NFC
         )
         
         return main_layout
     
-    def update_sensor_data(self, dt):
-        """Periodically update sensor data"""
+    def _initial_connect(self, dt):
+        """Try to establish NFC connection after app start."""
         try:
-            # Read from sensors via JNI
+            if self.sensor_interface.connect():
+                logger.info("NFC connection established")
+            else:
+                logger.info("NFC not connected yet — will retry on data poll")
+        except Exception as e:
+            logger.warning(f"Initial NFC connect failed: {e}")
+
+    def update_sensor_data(self, dt):
+        """Periodically poll for sensor data via NFC."""
+        try:
             data = self.sensor_interface.read_sensor_data()
             
             if data:
@@ -94,15 +117,31 @@ class SensorMonitorApp(App):
                 self.csv_handler.save_sensor_reading(data)
                 
         except Exception as e:
-            print(f"Error updating sensor data: {e}")
+            logger.error(f"Error updating sensor data: {e}")
     
     def on_stop(self):
-        """Stop the app"""
+        """Clean up on app stop."""
         if self.data_update_event:
             self.data_update_event.cancel()
+        if self.sensor_interface:
+            try:
+                self.sensor_interface.disconnect()
+            except Exception:
+                pass
+        logger.info("SensorMonitor stopped")
+    
+    def on_pause(self):
+        """Handle Android pause (app goes to background)."""
         return True
+    
+    def on_resume(self):
+        """Handle Android resume — re-enable NFC reader mode."""
+        if self.sensor_interface:
+            try:
+                self.sensor_interface.connect()
+            except Exception as e:
+                logger.warning(f"Error resuming NFC: {e}")
 
 
 if __name__ == '__main__':
-    app = SensorMonitorApp()
-    app.run()
+    SensorMonitorApp().run()

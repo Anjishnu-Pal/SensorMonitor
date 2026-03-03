@@ -3,7 +3,16 @@
 
 ## Overview
 
-SensorMonitor is a small Python/Kivy application for reading, visualizing, and saving sensor data. It includes a desktop Kivy UI and Android support (via Buildozer). The app collects sensor data, displays it on a dashboard and graphs, and stores CSV logs.
+SensorMonitor is a small Python/Kivy application for reading, visualizing, and saving sensor data. It includes a desktop Kivy UI and Android support (via Buildozer). The app collects sensor data from an NHS 3152 NFC sensor, displays it on a dashboard and graphs, and stores CSV logs.
+
+### Supported Sensor Ranges
+| Parameter   | Range         | Unit   |
+|-------------|---------------|--------|
+| Temperature | 0 – 60        | °C     |
+| pH          | 0 – 14        | —      |
+| Glucose     | 30 – 250      | mg/dL  |
+
+Values outside these ranges are rejected as implausible by the sensor bridge.
 
 ## Requirements
 
@@ -82,8 +91,12 @@ When first launched, approve any permission requests shown by the app.
 	1. Tap `Start` (if required by the app) so that the app is listening for NFC tags.
 	2. Hold the NHS 3152 tag close to the phone's NFC antenna (commonly near the top or center-back of the device). Start within 1–3 cm of the antenna and move slowly.
 	3. The app should detect the tag and display the latest readings. Wait 1–3 seconds after detection for the values to update.
+	   - Temperature: 0–60 °C
+	   - pH: 0–14
+	   - Glucose: 30–250 mg/dL
 - Graphs screen:
 	- Shows time-series plots of past readings collected during the current session or loaded from storage.
+	- Fixed Y-axis scales: Temperature 0–60 °C, pH 0–14, Glucose 30–250 mg/dL.
 	- Pinch to zoom and swipe to pan where supported.
 - Settings screen:
 	- Sampling rate: how often the app polls for readings.

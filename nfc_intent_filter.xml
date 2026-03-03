@@ -1,0 +1,14 @@
+<!-- NFC Intent Filters for NHS 3152 sensor tag detection -->
+<intent-filter>
+    <action android:name="android.nfc.action.NDEF_DISCOVERED"/>
+    <category android:name="android.intent.category.DEFAULT"/>
+    <data android:mimeType="application/vnd.nhs3152.health"/>
+</intent-filter>
+<intent-filter>
+    <action android:name="android.nfc.action.TECH_DISCOVERED"/>
+    <category android:name="android.intent.category.DEFAULT"/>
+</intent-filter>
+<intent-filter>
+    <action android:name="android.nfc.action.TAG_DISCOVERED"/>
+    <category android:name="android.intent.category.DEFAULT"/>
+</intent-filter>
