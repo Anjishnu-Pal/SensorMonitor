@@ -14,7 +14,7 @@ class AppConfig:
     
     DEFAULT_CONFIG = {
         'app_name': 'SensorMonitor',
-        'version': '1.0.0',
+        'version': '1.03',
         'sensor': {
             'communication_mode': 'NFC',
             'nfc_reader_presence_check': 250,  # milliseconds

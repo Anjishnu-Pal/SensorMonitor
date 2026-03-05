@@ -16,13 +16,16 @@ from kivy.clock import Clock
 class SettingsScreen(BoxLayout):
     """Settings screen with NFC configuration and troubleshooting controls."""
 
-    def __init__(self, sensor_interface, **kwargs):
+    def __init__(self, sensor_interface, permission_manager=None,
+                 csv_handler=None, **kwargs):
         super().__init__(**kwargs)
         self.orientation = 'vertical'
         self.padding = 10
         self.spacing = 10
 
         self.sensor_interface = sensor_interface
+        self.permission_manager = permission_manager
+        self.csv_handler = csv_handler
 
         # ── Title ─────────────────────────────────────────────────────────
         title = Label(
@@ -137,6 +140,28 @@ class SettingsScreen(BoxLayout):
             color=(0.8, 0.8, 0.8, 1), halign='left', valign='top',
             text_size=(None, None)))
 
+        # -- Permissions Section --
+        inner.add_widget(Label(
+            text='── App Permissions ──',
+            size_hint_y=None, height=30, bold=True, color=(1, 0.85, 0.4, 1)))
+
+        self._perm_status_grid = GridLayout(
+            cols=2, spacing=6, size_hint_y=None, row_default_height=36)
+        self._perm_status_grid.bind(
+            minimum_height=self._perm_status_grid.setter('height'))
+        inner.add_widget(self._perm_status_grid)
+
+        # Populated in _refresh_permission_rows() called below
+        self._perm_rows = {}
+
+        request_perm_btn = Button(
+            text='Request / Refresh Permissions',
+            size_hint_y=None, height=44,
+            background_color=(0.2, 0.5, 0.85, 1),
+            font_size='13sp')
+        request_perm_btn.bind(on_press=self._on_request_permissions)
+        inner.add_widget(request_perm_btn)
+
         scroll.add_widget(inner)
         self.add_widget(scroll)
 
@@ -198,6 +223,18 @@ class SettingsScreen(BoxLayout):
                 'ph_calibration': float(self.ph_calibration_input.text or '7.0'),
             }
             self.sensor_interface.update_configuration(settings)
+            # Apply storage path to CSVHandler so new readings go to the
+            # chosen directory, not just to sensor_interface.config.
+            if self.csv_handler and self.path_input.text.strip():
+                from pathlib import Path
+                new_path = Path(self.path_input.text.strip())
+                try:
+                    new_path.mkdir(parents=True, exist_ok=True)
+                    self.csv_handler.storage_path = new_path
+                    self.csv_handler._initialize_csv_file()
+                except Exception as path_err:
+                    self._set_status_warn(f'Path not updated: {path_err}')
+                    return
             self._set_status_ok('Settings saved successfully')
         except ValueError as e:
             self._set_status_err(f'Invalid input: {e}')
@@ -278,4 +315,61 @@ class SettingsScreen(BoxLayout):
             self._set_status_ok('All settings reset to defaults')
         except Exception as e:
             self._set_status_err(f'Reset failed: {e}')
+
+    # ── Permission helpers ────────────────────────────────────────────────
+
+    def _refresh_permission_rows(self) -> None:
+        """Populate / update the permissions status grid."""
+        if self.permission_manager is None:
+            return
+
+        self._perm_status_grid.clear_widgets()
+        self._perm_rows.clear()
+
+        summary = self.permission_manager.get_status_summary()
+        for label_text, status in summary.items():
+            lbl = Label(
+                text=label_text, font_size='12sp',
+                size_hint_y=None, height=36,
+                halign='left', valign='middle')
+            lbl.bind(size=lbl.setter('text_size'))
+            self._perm_status_grid.add_widget(lbl)
+
+            if status == 'Granted':
+                colour = (0.3, 1.0, 0.3, 1)
+            elif status == 'Denied':
+                colour = (1.0, 0.35, 0.35, 1)
+            else:
+                colour = (0.6, 0.6, 0.6, 1)
+
+            status_lbl = Label(
+                text=status, font_size='12sp',
+                size_hint_y=None, height=36,
+                color=colour, halign='center', valign='middle')
+            status_lbl.bind(size=status_lbl.setter('text_size'))
+            self._perm_status_grid.add_widget(status_lbl)
+            self._perm_rows[label_text] = status_lbl
+
+    def on_parent(self, widget, parent) -> None:
+        """Refresh permission rows whenever this tab is added to a parent."""
+        super().on_parent(widget, parent) if hasattr(super(), 'on_parent') else None
+        Clock.schedule_once(lambda _dt: self._refresh_permission_rows(), 0.1)
+
+    def _on_request_permissions(self, _instance) -> None:
+        """Re-request all permissions from within Settings."""
+        if self.permission_manager is None:
+            self._set_status_warn('Permission manager not available')
+            return
+
+        self._set_status('Requesting permissions…', (1, 0.85, 0.3, 1))
+
+        def _done(granted, results):
+            self._refresh_permission_rows()
+            if granted:
+                self._set_status_ok('All required permissions granted')
+            else:
+                self._set_status_warn(
+                    'Some permissions denied — check the list above')
+
+        self.permission_manager.request_all(on_complete=_done)
 

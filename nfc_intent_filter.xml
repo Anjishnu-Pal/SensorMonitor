@@ -1,4 +1,11 @@
 <!-- NFC Intent Filters for NHS 3152 sensor tag detection -->
+<!-- NDEF_DISCOVERED: text/plain — catches standard RTD_TEXT tags (Android 12+ recommended) -->
+<intent-filter>
+    <action android:name="android.nfc.action.NDEF_DISCOVERED"/>
+    <category android:name="android.intent.category.DEFAULT"/>
+    <data android:mimeType="text/plain"/>
+</intent-filter>
+<!-- NDEF_DISCOVERED: NHS 3152 proprietary MIME type -->
 <intent-filter>
     <action android:name="android.nfc.action.NDEF_DISCOVERED"/>
     <category android:name="android.intent.category.DEFAULT"/>

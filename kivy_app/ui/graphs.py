@@ -165,7 +165,8 @@ class GraphsScreen(BoxLayout):
 
         self.add_widget(btn_layout)
 
-    # ── helpers ───────────────────────────────────────────────────────────
+
+    # ── helpers ───────────────────────────────────────────────────────────\n
     def _fmt_time(self, ts):
         if isinstance(ts, datetime):
             return ts.strftime('%H:%M:%S')

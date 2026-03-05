@@ -22,15 +22,38 @@ import android.util.Log;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+
+import android.app.PendingIntent;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.os.Build;
+import android.os.Parcelable;
+import android.provider.Settings;
 
 public class SensorBridge implements NfcAdapter.ReaderCallback {
 
+    // True when libsensor_nhs3152.so was successfully loaded.
+    // The app degrades gracefully without it — all real data comes from the
+    // NDEF/IsoDep/NfcA Java pipeline; native calls are purely optional bookkeeping.
+    private static volatile boolean nativeLibLoaded = false;
+
     static {
-        // Load native library
-        System.loadLibrary("sensor_nhs3152");
+        try {
+            System.loadLibrary("sensor_nhs3152");
+            nativeLibLoaded = true;
+            android.util.Log.i("SensorBridge", "libsensor_nhs3152.so loaded successfully");
+        } catch (UnsatisfiedLinkError e) {
+            android.util.Log.w("SensorBridge",
+                "Native library libsensor_nhs3152.so not found — running in pure-Java NFC mode. " + e.getMessage());
+        }
     }
 
     private NfcAdapter nfcAdapter;
@@ -41,6 +64,15 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
     private Tag currentTag = null;
     private volatile float[] lastSensorData = null;
 
+    // Timestamp (ms since epoch) when parseHealthData last stored valid data.
+    // Used by Python to determine if the tag is still in range (freshness check).
+    private volatile long lastDataTimestampMs = 0;
+
+    // Background scheduler for periodic re-reads while tag remains in RF field.
+    private final ScheduledExecutorService scheduler =
+            Executors.newSingleThreadScheduledExecutor();
+    private ScheduledFuture<?> periodicReadTask = null;
+
     private static final String TAG = "SensorBridge";
 
     // NFC Reader Mode flags:
@@ -49,6 +81,15 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
     //   Do NOT include FLAG_READER_SKIP_NDEF_CHECK so NDEF messages are read properly
     private static final int NFC_READER_MODE = NfcAdapter.FLAG_READER_NFC_A
                                              | NfcAdapter.FLAG_READER_NFC_B;
+
+    // ── Foreground Dispatch (Android 12+ / API 31+ compliant) ───────────────
+    // PendingIntent re-delivered to this Activity on tag discovery.
+    // FLAG_MUTABLE is mandatory on API 31+ so the system can write tag extras.
+    private PendingIntent nfcPendingIntent;
+    // Intent filters passed to enableForegroundDispatch.
+    private IntentFilter[] foregroundIntentFilters;
+    // Optional tech-list whitelist; null = accept any technology.
+    private String[][] foregroundTechLists;
 
     public SensorBridge() {
         // Default constructor (used by non-Android testing only)
@@ -80,17 +121,26 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
                 return false;
             }
 
-            // Mark native side as connected
-            connected = nativeConnect("NFC Mode", 0);
+            // Mark native side as connected (native call is optional bookkeeping only)
+            connected = nativeLibLoaded ? nativeConnect("NFC Mode", 0) : true;
 
             // Start NFC reader mode for continuous tag detection
-            if (connected && activity != null) {
-                enableReaderMode();
+            // Important: Activity must be available and in foreground
+            if (connected) {
+                if (activity != null) {
+                    enableReaderMode();
+                    Log.i(TAG, "NFC reader mode enabled for continuous scanning");
+                } else {
+                    Log.w(TAG, "Activity reference is null — reader mode could not be enabled");
+                    Log.w(TAG, "This may happen if called before Activity is ready");
+                    Log.i(TAG, "NFC will work via intent dispatch, but reader mode won't be active");
+                }
             }
 
             return connected;
         } catch (Exception e) {
             Log.e(TAG, "Error connecting to NFC: " + e.getMessage());
+            e.printStackTrace();
             return false;
         }
     }
@@ -126,10 +176,12 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
      */
     public void disconnect() {
         if (connected) {
+            stopPeriodicRead();
             disableReaderMode();
-            nativeDisconnect();
+            if (nativeLibLoaded) nativeDisconnect();
             connected = false;
-            lastSensorData = null;
+            lastSensorData      = null;
+            lastDataTimestampMs = 0;
         }
     }
 
@@ -172,9 +224,7 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
      * Calibrate sensors via NFC tag write.
      */
     public boolean calibrate() {
-        if (!connected) {
-            return false;
-        }
+        if (!connected || !nativeLibLoaded) return false;
         return nativeCalibrate();
     }
 
@@ -182,20 +232,16 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
      * Test NFC connection — checks if a valid tag was detected.
      */
     public boolean testConnection() {
-        if (!connected) {
-            return false;
-        }
-        return nativeTestConnection();
+        if (!connected) return false;
+        return nativeLibLoaded ? nativeTestConnection() : true;
     }
 
     /**
      * Get NFC adapter status / firmware version.
      */
     public String getFirmwareVersion() {
-        if (!connected) {
-            return "NFC Not Connected";
-        }
-        return nativeFirmwareVersion();
+        if (!connected) return "NFC Not Connected";
+        return nativeLibLoaded ? nativeFirmwareVersion() : "Pure-Java NFC Mode";
     }
 
     /**
@@ -231,6 +277,7 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
             sensorData[2] = (float) glucoseRaw;
 
             lastSensorData = sensorData;
+            lastDataTimestampMs = System.currentTimeMillis();
             Log.i(TAG, String.format(
                 "Parsed sensor data — Temp: %.1f°C, pH: %.2f, Glucose: %.0f mg/dL",
                 sensorData[0], sensorData[1], sensorData[2]));
@@ -249,33 +296,95 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
      */
     @Override
     public void onTagDiscovered(Tag tag) {
+        if (tag == null) {
+            Log.w(TAG, "onTagDiscovered called with null tag");
+            return;
+        }
+        
         currentTag = tag;
         String[] techList = tag.getTechList();
-        Log.i(TAG, "NFC tag discovered! Tech: " + Arrays.toString(techList));
+        Log.i(TAG, "✓ NFC tag DISCOVERED! Technologies: " + Arrays.toString(techList));
 
-        // Store tag UID in native layer
+        // Cancel any ongoing periodic read from a previous tag
+        stopPeriodicRead();
+
+        // Store tag UID in native layer (if the native .so was loaded)
         byte[] uid = tag.getId();
         if (uid != null) {
-            nativeSetNFCData(uid);
+            if (nativeLibLoaded) nativeSetNFCData(uid);
             Log.i(TAG, "Tag UID: " + bytesToHex(uid));
         }
 
         // Strategy 1: Try NDEF first (most NHS 3152 configs use NDEF)
+        Log.i(TAG, "→ Trying NDEF read...");
         if (tryReadNdef(tag)) {
+            Log.i(TAG, "✓ Successfully read NDEF data");
+            startPeriodicRead(tag);   // keep reading every 2s while tag is in range
             return;
         }
 
         // Strategy 2: Try IsoDep (ISO 14443-4) for NHS 3152 APDU communication
+        Log.i(TAG, "→ Trying IsoDep (APDU) read...");
         if (tryReadIsoDep(tag)) {
+            Log.i(TAG, "✓ Successfully read via IsoDep");
+            startPeriodicRead(tag);
             return;
         }
 
         // Strategy 3: Try raw NFC-A (ISO 14443-3A) memory read
+        Log.i(TAG, "→ Trying NFC-A (raw) read...");
         if (tryReadNfcA(tag)) {
+            Log.i(TAG, "✓ Successfully read via NFC-A");
+            startPeriodicRead(tag);
             return;
         }
 
-        Log.w(TAG, "Could not read sensor data from tag via any method");
+        Log.w(TAG, "✗ Could not read sensor data from tag via ANY method");
+        Log.w(TAG, "  This may indicate the tag is not an NHS 3152 or data is corrupted");
+    }
+
+    /**
+     * Start a background task that re-reads the tag every 2 seconds.
+     * <p>
+     * The NHS 3152 tag stays in the RF field while held near the phone.
+     * This loop keeps pulling fresh data until the tag leaves range,
+     * at which point the I/O call fails and we clear {@code lastSensorData}.
+     * <p>
+     * The 2-second interval matches the Python polling interval, ensuring
+     * the Python layer always gets up-to-date values.
+     *
+     * @param tag The live {@link Tag} object from {@code onTagDiscovered}.
+     */
+    private void startPeriodicRead(final Tag tag) {
+        stopPeriodicRead(); // cancel any leftover task first
+        periodicReadTask = scheduler.scheduleAtFixedRate(() -> {
+            try {
+                boolean ok = tryReadNdef(tag)
+                          || tryReadIsoDep(tag)
+                          || tryReadNfcA(tag);
+                if (!ok) {
+                    Log.i(TAG, "Periodic re-read: tag no longer responding — sensor left range");
+                    lastSensorData      = null;
+                    lastDataTimestampMs = 0;
+                    stopPeriodicRead();
+                }
+            } catch (Exception e) {
+                Log.i(TAG, "Periodic re-read I/O error — tag left range: " + e.getMessage());
+                lastSensorData      = null;
+                lastDataTimestampMs = 0;
+                stopPeriodicRead();
+            }
+        }, 2, 2, TimeUnit.SECONDS);
+        Log.i(TAG, "Periodic re-read started (2s interval)");
+    }
+
+    /** Cancel the periodic re-read task if running. */
+    private void stopPeriodicRead() {
+        if (periodicReadTask != null && !periodicReadTask.isCancelled()) {
+            periodicReadTask.cancel(false);
+            periodicReadTask = null;
+            Log.d(TAG, "Periodic re-read stopped");
+        }
     }
 
     /**
@@ -299,7 +408,25 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
                 for (NdefRecord record : records) {
                     byte[] payload = record.getPayload();
 
-                    // Check for custom Health record type ('H')
+                    // ── Priority 1: Standard RTD_TEXT (NFC Forum Text RTD) ──────────
+                    // Strips the status byte and IANA language code (e.g. "en") first,
+                    // then attempts CSV sensor parsing of the bare text content.
+                    if (record.getTnf() == NdefRecord.TNF_WELL_KNOWN
+                            && Arrays.equals(record.getType(), NdefRecord.RTD_TEXT)) {
+                        String text = parseTextRecord(record);
+                        if (text != null) {
+                            Log.i(TAG, "RTD_TEXT record value: " + text);
+                            float[] data = parseCsvSensorText(text);
+                            if (data != null) {
+                                lastSensorData = data;
+                                ndef.close();
+                                return true;
+                            }
+                        }
+                        continue; // don't fall through to binary parsing for text records
+                    }
+
+                    // ── Priority 2: Custom NHS 3152 binary Health record ('H') ───────
                     if (record.getTnf() == NdefRecord.TNF_WELL_KNOWN) {
                         byte[] type = record.getType();
                         if (type.length > 0 && type[0] == 'H') {
@@ -311,7 +438,7 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
                         }
                     }
 
-                    // Also try parsing any payload >= 6 bytes as sensor data
+                    // ── Priority 3: Any payload >= 6 bytes treated as raw binary ─────
                     if (payload != null && payload.length >= 6) {
                         float[] data = parseHealthData(payload);
                         if (data != null && isDataPlausible(data)) {
@@ -499,4 +626,387 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
     private native boolean nativeTestConnection();
     private native String nativeFirmwareVersion();
     private native boolean nativeSetNFCData(byte[] nfcData);
+
+    /**
+     * Helper method to get Activity when it becomes available.
+     * Can be called by Python code during app lifecycle to set the Activity.
+     */
+    public void setActivity(Activity act) {
+        this.activity = act;
+        this.context = act.getApplicationContext();
+        if (nfcAdapter == null) {
+            this.nfcAdapter = NfcAdapter.getDefaultAdapter(context);
+        }
+        Log.i(TAG, "Activity set — NFC reader mode can now be enabled");
+        
+        // Try to enable reader mode if we're already connected
+        if (connected && !isReading) {
+            enableReaderMode();
+        }
+    }
+
+    /**
+     * Check if NFC is available and working.
+     */
+    public boolean isNfcAvailable() {
+        return nfcAdapter != null && nfcAdapter.isEnabled();
+    }
+
+    /**
+     * Get current connection state.
+     */
+    public boolean isConnected() {
+        return connected;
+    }
+
+    /**
+     * Return the milliseconds elapsed since the last successful sensor data parse.
+     * Returns {@link Long#MAX_VALUE} if no data has ever been parsed.
+     * <p>
+     * Python uses this to distinguish "tag in range" (age &lt; threshold) from
+     * "tag left range" (age &gt; threshold), enabling automatic stop of storage.
+     */
+    public long getLastDataAgeMs() {
+        if (lastDataTimestampMs == 0) return Long.MAX_VALUE;
+        return System.currentTimeMillis() - lastDataTimestampMs;
+    }
+
+    /**
+     * Get whether reader mode is active.
+     */
+    public boolean isReaderModeActive() {
+        return isReading;
+    }
+
+    /**
+     * Return the UID of the most recently discovered NFC tag as an uppercase
+     * hex string (e.g. {@code "04A1B2C3D4E5F6"}).
+     *
+     * <p>The UID uniquely identifies the physical tag / NHS 3152 device.
+     * Returns an empty string when no tag has been seen yet.</p>
+     */
+    public String getLastTagId() {
+        if (currentTag != null) {
+            byte[] uid = currentTag.getId();
+            if (uid != null) return bytesToHex(uid);
+        }
+        return "";
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // ── Foreground Dispatch — Android 12+ (API 31+) ──────────────────────
+    // ════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Initialise the {@link PendingIntent} and {@link IntentFilter} arrays
+     * needed by {@link NfcAdapter#enableForegroundDispatch}.
+     *
+     * <p><b>Android 12 (API 31) requirement:</b> PendingIntent must declare
+     * {@link PendingIntent#FLAG_MUTABLE} so the system can fill in the
+     * discovered tag's extras before re-delivering the intent.</p>
+     *
+     * <p>Call once from the host Activity's {@code onCreate()} before
+     * {@link #enableForegroundDispatch()} is invoked in {@code onResume()}.</p>
+     */
+    public void initForegroundDispatch(Activity act) {
+        if (act == null) {
+            Log.w(TAG, "initForegroundDispatch: activity is null — skipping");
+            return;
+        }
+        this.activity = act;
+        this.context  = act.getApplicationContext();
+        if (nfcAdapter == null) {
+            nfcAdapter = NfcAdapter.getDefaultAdapter(context);
+        }
+
+        // Re-deliver to the same Activity instance (FLAG_ACTIVITY_SINGLE_TOP
+        // routes to onNewIntent instead of creating a fresh Activity).
+        Intent nfcIntent = new Intent(act, act.getClass())
+                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+
+        // Android 12 (Build.VERSION_CODES.S = API 31) mandates an explicit
+        // mutability flag.  FLAG_MUTABLE is required here because the NFC
+        // subsystem must write tag extras into the intent before delivery.
+        int pendingFlags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            pendingFlags |= PendingIntent.FLAG_MUTABLE;
+        }
+        nfcPendingIntent = PendingIntent.getActivity(act, 0, nfcIntent, pendingFlags);
+
+        // ── Intent filters ────────────────────────────────────────────────
+        IntentFilter ndefTextFilter = new IntentFilter(NfcAdapter.ACTION_NDEF_DISCOVERED);
+        try {
+            ndefTextFilter.addDataType("text/plain");                   // RTD_TEXT tags
+            ndefTextFilter.addDataType("application/vnd.nhs3152.health"); // NHS 3152 custom type
+        } catch (IntentFilter.MalformedMimeTypeException e) {
+            Log.e(TAG, "initForegroundDispatch — bad MIME type: " + e.getMessage());
+        }
+        IntentFilter techFilter = new IntentFilter(NfcAdapter.ACTION_TECH_DISCOVERED);
+        IntentFilter tagFilter  = new IntentFilter(NfcAdapter.ACTION_TAG_DISCOVERED);
+        foregroundIntentFilters = new IntentFilter[]{ndefTextFilter, techFilter, tagFilter};
+
+        // ── Tech-list whitelist ───────────────────────────────────────────
+        // Each inner array is an AND group; multiple outer arrays are OR-ed.
+        foregroundTechLists = new String[][]{
+            new String[]{android.nfc.tech.Ndef.class.getName()},
+            new String[]{android.nfc.tech.NfcA.class.getName()},
+            new String[]{android.nfc.tech.IsoDep.class.getName()},
+        };
+
+        Log.i(TAG, "Foreground dispatch initialised — FLAG_MUTABLE=" +
+                   (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S));
+    }
+
+    /**
+     * Enable NFC foreground dispatch so this app takes priority over all
+     * other apps when an NFC tag is tapped.
+     *
+     * <p>Call from the host Activity's {@code onResume()}.</p>
+     */
+    public void enableForegroundDispatch() {
+        if (nfcAdapter == null) {
+            Log.w(TAG, "enableForegroundDispatch: NfcAdapter unavailable");
+            return;
+        }
+        if (activity == null || nfcPendingIntent == null) {
+            Log.w(TAG, "enableForegroundDispatch: call initForegroundDispatch(activity) first");
+            return;
+        }
+        if (!nfcAdapter.isEnabled()) {
+            Log.w(TAG, "enableForegroundDispatch: NFC is OFF — prompting user");
+            promptEnableNfc();
+            return;
+        }
+        nfcAdapter.enableForegroundDispatch(
+                activity, nfcPendingIntent,
+                foregroundIntentFilters, foregroundTechLists);
+        Log.i(TAG, "✓ Foreground dispatch ENABLED — app captures NFC tags in foreground");
+    }
+
+    /**
+     * Disable NFC foreground dispatch.
+     *
+     * <p>Call from the host Activity's {@code onPause()} to release priority
+     * so other apps can receive NFC intents when this Activity is not visible.</p>
+     */
+    public void disableForegroundDispatch() {
+        if (nfcAdapter != null && activity != null) {
+            try {
+                nfcAdapter.disableForegroundDispatch(activity);
+                Log.i(TAG, "Foreground dispatch DISABLED");
+            } catch (Exception e) {
+                Log.w(TAG, "disableForegroundDispatch error: " + e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Prompt the user to enable NFC via the system Settings screen.
+     *
+     * <p>Called automatically by {@link #enableForegroundDispatch()} when NFC
+     * is off, but can also be invoked directly from the UI layer.</p>
+     */
+    public void promptEnableNfc() {
+        if (context == null) {
+            Log.e(TAG, "promptEnableNfc: context is null — cannot open Settings");
+            return;
+        }
+        Intent settingsIntent = new Intent(Settings.ACTION_NFC_SETTINGS)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        context.startActivity(settingsIntent);
+        Log.i(TAG, "Opened NFC Settings so user can enable NFC");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // ── onNewIntent handler ───────────────────────────────────────────────
+    // ════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Handle an NFC {@link Intent} delivered via foreground dispatch or the
+     * Android tag-dispatch system.
+     *
+     * <p>Wire this into the host Activity's {@code onNewIntent()} like this:
+     * <pre>{@code
+     *   @Override
+     *   public void onNewIntent(Intent intent) {
+     *       super.onNewIntent(intent);
+     *       setIntent(intent);                       // keep getIntent() fresh
+     *       sensorBridge.handleNfcIntent(intent);
+     *   }
+     * }</pre>
+     *
+     * <p>Uses the modern type-safe {@code getParcelableArrayExtra(key, Class)}
+     * overload (API 33 / TIRAMISU) with a safe deprecated fallback for API 31/32
+     * — matching the {@code IntentCompat} pattern without requiring AndroidX.</p>
+     *
+     * @param intent The intent received in {@code onNewIntent}.
+     * @return {@code true} if sensor data was successfully extracted and stored.
+     */
+    public boolean handleNfcIntent(Intent intent) {
+        if (intent == null) return false;
+        String action = intent.getAction();
+        Log.i(TAG, "handleNfcIntent: action=" + action);
+
+        if (!NfcAdapter.ACTION_NDEF_DISCOVERED.equals(action)
+                && !NfcAdapter.ACTION_TECH_DISCOVERED.equals(action)
+                && !NfcAdapter.ACTION_TAG_DISCOVERED.equals(action)) {
+            return false;
+        }
+
+        // ── Step 1: Extract NDEF messages ─────────────────────────────────
+        // API 33+: type-safe overload avoids raw-type / unchecked-cast warnings.
+        // API 31/32: fall back to the deprecated untyped overload (safe cast).
+        Parcelable[] rawMessages;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            rawMessages = intent.getParcelableArrayExtra(
+                    NfcAdapter.EXTRA_NDEF_MESSAGES, NdefMessage.class);
+        } else {
+            //noinspection deprecation — safe pre-API33 fallback; value is always NdefMessage[]
+            rawMessages = intent.getParcelableArrayExtra(NfcAdapter.EXTRA_NDEF_MESSAGES);
+        }
+
+        if (rawMessages != null && rawMessages.length > 0) {
+            NdefMessage[] messages = new NdefMessage[rawMessages.length];
+            for (int i = 0; i < rawMessages.length; i++) {
+                messages[i] = (NdefMessage) rawMessages[i];
+            }
+            Log.i(TAG, "Intent carries " + messages.length + " NDEF message(s)");
+            if (processNdefMessages(messages)) return true;
+        }
+
+        // ── Step 2: Fallback — use the raw Tag object ─────────────────────
+        Tag tag;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            tag = intent.getParcelableExtra(NfcAdapter.EXTRA_TAG, Tag.class);
+        } else {
+            //noinspection deprecation — safe pre-API33 fallback
+            tag = (Tag) intent.getParcelableExtra(NfcAdapter.EXTRA_TAG);
+        }
+        if (tag != null) {
+            Log.i(TAG, "No NDEF in intent — routing to onTagDiscovered");
+            onTagDiscovered(tag);
+            return true;
+        }
+
+        Log.w(TAG, "handleNfcIntent: intent had no NDEF messages and no Tag extra");
+        return false;
+    }
+
+    /**
+     * Iterate an array of {@link NdefMessage} objects from an intent, trying
+     * RTD_TEXT decoding first, then falling back to binary NHS 3152 parsing.
+     */
+    private boolean processNdefMessages(NdefMessage[] messages) {
+        for (NdefMessage message : messages) {
+            for (NdefRecord record : message.getRecords()) {
+
+                // RTD_TEXT — requires language-code stripping (see parseTextRecord)
+                if (record.getTnf() == NdefRecord.TNF_WELL_KNOWN
+                        && Arrays.equals(record.getType(), NdefRecord.RTD_TEXT)) {
+                    String text = parseTextRecord(record);
+                    if (text != null) {
+                        Log.i(TAG, "processNdefMessages — RTD_TEXT: \"" + text + "\"");
+                        float[] data = parseCsvSensorText(text);
+                        if (data != null) {
+                            lastSensorData = data;
+                            return true;
+                        }
+                    }
+                    continue; // don't fall through to binary parsing for text records
+                }
+
+                // Binary NHS 3152 payload (any other record type)
+                byte[] payload = record.getPayload();
+                if (payload != null && payload.length >= 6) {
+                    float[] data = parseHealthData(payload);
+                    if (data != null && isDataPlausible(data)) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // ── NDEF Parsing Engine ───────────────────────────────────────────────
+    // ════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Decode a {@link NdefRecord#RTD_TEXT} payload into a plain Java String.
+     *
+     * <p>NFC Forum Text Record Type Definition (RTD_TEXT) payload layout:</p>
+     * <pre>
+     *   Byte 0  — Status byte
+     *     Bit 7  : 0 = UTF-8,  1 = UTF-16
+     *     Bits 5-0 : language-code length  (e.g. "en" → 2)
+     *   Bytes 1 … langLen   : IANA language tag (ASCII, e.g. "en", "fr", "de")
+     *   Bytes (1+langLen) … : actual text in the declared encoding
+     * </pre>
+     *
+     * <p>The language code is stripped so only the human-readable text (or
+     * sensor CSV payload) is returned to the caller.</p>
+     *
+     * @param record A {@code TNF_WELL_KNOWN + RTD_TEXT} NdefRecord.
+     * @return The decoded text string, or {@code null} on error / malformed data.
+     */
+    private String parseTextRecord(NdefRecord record) {
+        try {
+            byte[] payload = record.getPayload();
+            if (payload == null || payload.length < 1) return null;
+
+            // Status byte: bit-7 = encoding, bits 5-0 = language-code length
+            byte statusByte = payload[0];
+            boolean isUtf16  = (statusByte & 0x80) != 0;
+            int langCodeLen  = statusByte & 0x3F;   // lower 6 bits
+
+            // Guard: payload must contain at least status + langCode + 1 text byte
+            if (1 + langCodeLen >= payload.length) {
+                Log.w(TAG, "parseTextRecord: malformed payload — lang-code length exceeds payload size");
+                return null;
+            }
+
+            // Language code (informational: "en", "de", "fr", …)
+            String langCode = new String(payload, 1, langCodeLen, StandardCharsets.US_ASCII);
+
+            // Actual text — everything after the language code
+            String text = new String(
+                    payload,
+                    1 + langCodeLen,
+                    payload.length - 1 - langCodeLen,
+                    isUtf16 ? StandardCharsets.UTF_16 : StandardCharsets.UTF_8);
+
+            Log.d(TAG, "parseTextRecord [lang=" + langCode + ", utf16=" + isUtf16
+                    + "]: \"" + text + "\"");
+            return text;
+
+        } catch (Exception e) {
+            Log.e(TAG, "parseTextRecord error: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Parse a comma-separated sensor value string into {@code float[3]}.
+     *
+     * <p>Expected format: {@code "temperature,ph,glucose"}
+     * e.g. {@code "36.6,7.40,95"}.  Values are validated against plausible
+     * physiological ranges via {@link #isDataPlausible(float[])}.</p>
+     *
+     * @param text Decoded text from an RTD_TEXT record.
+     * @return {@code float[3]} {temperature, pH, glucose}, or {@code null} if
+     *         the string is not a valid sensor CSV or values are implausible.
+     */
+    private float[] parseCsvSensorText(String text) {
+        try {
+            String[] parts = text.trim().split(",");
+            if (parts.length >= 3) {
+                float[] data = {
+                    Float.parseFloat(parts[0].trim()),
+                    Float.parseFloat(parts[1].trim()),
+                    Float.parseFloat(parts[2].trim())
+                };
+                return isDataPlausible(data) ? data : null;
+            }
+        } catch (NumberFormatException ignored) { /* not sensor CSV — ignore */ }
+        return null;
+    }
 }

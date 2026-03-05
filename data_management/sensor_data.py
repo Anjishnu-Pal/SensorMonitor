@@ -14,14 +14,17 @@ class SensorReading:
     temperature: float  # in Celsius (0-60 °C)
     ph: float  # pH value (0-14)
     glucose: float  # in mg/dL (30-250)
-    
+    tag_id: str = ""  # NFC tag UID hex string (e.g. '04A1B2C3')
+
     def __str__(self):
         ts = self.timestamp
         if isinstance(ts, datetime):
             ts_str = ts.strftime('%Y-%m-%d %H:%M:%S')
         else:
             ts_str = str(ts)
-        return f"{ts_str} - Temp: {self.temperature}°C, pH: {self.ph}, Glucose: {self.glucose} mg/dL"
+        tag = f", Tag: {self.tag_id}" if self.tag_id else ""
+        return (f"{ts_str} - Temp: {self.temperature}°C, "
+                f"pH: {self.ph}, Glucose: {self.glucose} mg/dL{tag}")
 
 
 def _parse_timestamp(value) -> datetime:
@@ -55,7 +58,8 @@ class SensorData:
             timestamp=_parse_timestamp(raw_ts),
             temperature=float(data.get('temperature', 0)),
             ph=float(data.get('ph', 7.0)),
-            glucose=float(data.get('glucose', 0))
+            glucose=float(data.get('glucose', 0)),
+            tag_id=str(data.get('tag_id', '')),
         )
         self.readings.append(reading)
         

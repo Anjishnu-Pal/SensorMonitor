@@ -51,8 +51,9 @@ class MainScreen(BoxLayout):
         export_btn.bind(on_press=self.export_data)
         self.add_widget(export_btn)
         
-        # Initial load
+        # Initial load + auto-refresh every 5 s
         Clock.schedule_once(self.refresh_data, 0)
+        Clock.schedule_interval(self.refresh_data, 5.0)
     
     def refresh_data(self, instance=None):
         """Refresh displayed data"""

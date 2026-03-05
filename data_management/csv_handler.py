@@ -3,11 +3,15 @@ CSV data handler for persistent storage
 """
 
 import csv
+import json
 import os
 from datetime import datetime
 from pathlib import Path
 from typing import List
 from data_management.sensor_data import SensorReading
+
+# CSV + JSON fieldnames
+_FIELDS = ['timestamp', 'temperature', 'ph', 'glucose', 'tag_id']
 
 
 class CSVHandler:
@@ -29,10 +33,7 @@ class CSVHandler:
         """Create CSV file with headers if it doesn't exist"""
         if not self.csv_file.exists():
             with open(self.csv_file, 'w', newline='') as f:
-                writer = csv.DictWriter(
-                    f,
-                    fieldnames=['timestamp', 'temperature', 'ph', 'glucose']
-                )
+                writer = csv.DictWriter(f, fieldnames=_FIELDS)
                 writer.writeheader()
     
     def save_sensor_reading(self, data: dict) -> bool:
@@ -44,22 +45,58 @@ class CSVHandler:
                 self.current_date = today
                 self.csv_file = self.storage_path / f"sensor_data_{self.current_date}.csv"
                 self._initialize_csv_file()
-            
+
             with open(self.csv_file, 'a', newline='') as f:
-                writer = csv.DictWriter(
-                    f,
-                    fieldnames=['timestamp', 'temperature', 'ph', 'glucose']
-                )
+                writer = csv.DictWriter(f, fieldnames=_FIELDS)
                 writer.writerow({
                     'timestamp': data.get('timestamp', datetime.now().isoformat()),
                     'temperature': data.get('temperature', 0),
                     'ph': data.get('ph', 7.0),
-                    'glucose': data.get('glucose', 0)
+                    'glucose': data.get('glucose', 0),
+                    'tag_id': data.get('tag_id', ''),
                 })
             return True
         except Exception as e:
             print(f"Error saving sensor reading: {e}")
             return False
+
+    def save_tap_event(self, data: dict) -> bool:
+        """Persist a single NFC-tap event to a JSON history file.
+
+        Each tap appends one entry to ``tap_history.json`` in the storage
+        directory.  This acts as a lightweight alternative to SharedPreferences
+        for storing structured tap records with timestamps.
+        """
+        tap_file = self.storage_path / 'tap_history.json'
+        try:
+            history: list = []
+            if tap_file.exists():
+                with open(tap_file, 'r') as f:
+                    history = json.load(f)
+            history.append({
+                'timestamp': data.get('timestamp', datetime.now().isoformat()),
+                'temperature': round(float(data.get('temperature', 0)), 2),
+                'ph': round(float(data.get('ph', 7.0)), 3),
+                'glucose': round(float(data.get('glucose', 0)), 1),
+                'tag_id': str(data.get('tag_id', '')),
+            })
+            with open(tap_file, 'w') as f:
+                json.dump(history, f, indent=2)
+            return True
+        except Exception as e:
+            print(f"Error saving tap event to JSON: {e}")
+            return False
+
+    def load_tap_history(self) -> List[dict]:
+        """Load all tap events from the JSON history file."""
+        tap_file = self.storage_path / 'tap_history.json'
+        try:
+            if tap_file.exists():
+                with open(tap_file, 'r') as f:
+                    return json.load(f)
+        except Exception as e:
+            print(f"Error loading tap history: {e}")
+        return []
     
     def load_sensor_readings(self, date=None) -> List[dict]:
         """Load sensor readings from CSV"""
@@ -78,9 +115,10 @@ class CSVHandler:
                 for row in reader:
                     readings.append({
                         'timestamp': datetime.fromisoformat(row['timestamp']),
-                        'temperature': float(row['temperature']),
-                        'ph': float(row['ph']),
-                        'glucose': float(row['glucose'])
+                        'temperature': float(row.get('temperature', 0)),
+                        'ph': float(row.get('ph', 7.0)),
+                        'glucose': float(row.get('glucose', 0)),
+                        'tag_id': row.get('tag_id', ''),
                     })
             return readings
         except Exception as e:
@@ -97,9 +135,10 @@ class CSVHandler:
                     for row in reader:
                         all_readings.append({
                             'timestamp': datetime.fromisoformat(row['timestamp']),
-                            'temperature': float(row['temperature']),
-                            'ph': float(row['ph']),
-                            'glucose': float(row['glucose'])
+                            'temperature': float(row.get('temperature', 0)),
+                            'ph': float(row.get('ph', 7.0)),
+                            'glucose': float(row.get('glucose', 0)),
+                            'tag_id': row.get('tag_id', ''),
                         })
         except Exception as e:
             print(f"Error loading all readings: {e}")
@@ -115,18 +154,16 @@ class CSVHandler:
             export_path = self.storage_path / filename
             
             with open(export_path, 'w', newline='') as f:
-                writer = csv.DictWriter(
-                    f,
-                    fieldnames=['timestamp', 'temperature', 'ph', 'glucose']
-                )
+                writer = csv.DictWriter(f, fieldnames=_FIELDS)
                 writer.writeheader()
-                
+
                 for reading in readings:
                     writer.writerow({
                         'timestamp': reading.timestamp.isoformat(),
                         'temperature': reading.temperature,
                         'ph': reading.ph,
-                        'glucose': reading.glucose
+                        'glucose': reading.glucose,
+                        'tag_id': reading.tag_id,
                     })
             
             return str(export_path)

@@ -60,20 +60,41 @@ class SensorInterface:
         """Establish NFC connection to NHS 3152 sensor tag."""
         try:
             if self.bridge and _ANDROID:
+                # Try to get fresh activity reference for better compatibility
+                try:
+                    from kivy.app import App
+                    app = App.get_running_app()
+                    if app and hasattr(app, 'root'):
+                        # Activity may be available now, send config
+                        pass
+                except Exception:
+                    pass
+                
                 result = self.bridge.connect(self.config)
                 self.connected = result
                 self.nfc_enabled = result
+                
                 if result:
                     logger.info("NFC connected to NHS 3152 sensor")
                 else:
-                    logger.warning("NFC connection failed")
+                    logger.warning("NFC connection failed — check NFC is enabled in device settings")
+                    try:
+                        # Check NFC status
+                        nfc_available = self.bridge._java_bridge.isNfcAvailable() if self.bridge._java_bridge else False
+                        reader_active = self.bridge._java_bridge.isReaderModeActive() if self.bridge._java_bridge else False
+                        logger.debug(f"NFC Available: {nfc_available}, Reader Mode Active: {reader_active}")
+                    except Exception:
+                        pass
+                
                 return result
             else:
-                logger.info("No Android bridge — running in mock/test mode")
+                logger.debug("No Android bridge — running in mock/test mode")
                 self.connected = False
                 return False
         except Exception as e:
             logger.error(f"Error connecting to NFC: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
             self.connected = False
             return False
 
@@ -89,12 +110,20 @@ class SensorInterface:
             logger.error(f"Error disconnecting: {e}")
             return False
 
+    # Data freshness threshold: if the last successful read is older than this,
+    # the tag has left range and we treat the sensor as disconnected.
+    # The Java periodic re-read loop also clears lastSensorData when tag leaves,
+    # but this guard is the Python-side safety net (e.g. if the scheduler missed).
+    _DATA_FRESH_MS = 10_000   # 10 seconds
+
     def read_sensor_data(self) -> Optional[Dict]:
         """
         Read current sensor data from NHS 3152 NFC tag.
-        Returns None until a real NFC tag is detected and read.
-        All three data values (temperature, pH, glucose) remain null
-        in the UI until the NHS 3152 sensor is physically recognised.
+
+        Returns a dict every 2 s while the tag is in range (fresh data
+        within _DATA_FRESH_MS).  Returns None — stopping display and storage —
+        as soon as the tag leaves range (Java clears lastSensorData via the
+        periodic re-read loop, and the age check here is a safety net).
         """
         # On Android, try real NFC reading
         if _ANDROID and self.bridge:
@@ -104,14 +133,30 @@ class SensorInterface:
                     return None
 
             try:
+                # ── Freshness check: has the tag left range? ──────────────
+                data_age_ms = self.bridge.getLastDataAgeMs()
+                if data_age_ms > self._DATA_FRESH_MS:
+                    # Tag has left range (or never tapped)
+                    if self.tag_detected:
+                        logger.info(
+                            f"NHS 3152 tag left range "
+                            f"(data age {data_age_ms}ms > {self._DATA_FRESH_MS}ms) "
+                            "— stopping storage")
+                        self.tag_detected = False
+                        self.connected    = False
+                    return None
+
+                # ── Tag is fresh/present — return the latest values ───────
                 sensor_data = self.bridge.getSensorReading()
                 if sensor_data and len(sensor_data) >= 3:
                     self.tag_detected = True
+                    self.connected    = True
                     return {
-                        'timestamp': datetime.now().isoformat(),
+                        'timestamp':   datetime.now().isoformat(),
                         'temperature': float(sensor_data[0]),
-                        'ph': float(sensor_data[1]),
-                        'glucose': float(sensor_data[2]),
+                        'ph':          float(sensor_data[1]),
+                        'glucose':     float(sensor_data[2]),
+                        'tag_id':      self.bridge.getLastTagId(),
                     }
                 else:
                     logger.debug("No NFC tag detected — waiting for tag...")
