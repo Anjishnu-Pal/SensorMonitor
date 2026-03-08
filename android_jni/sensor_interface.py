@@ -127,10 +127,12 @@ class SensorInterface:
         """
         # On Android, try real NFC reading
         if _ANDROID and self.bridge:
+            # Best-effort reconnect: do NOT gate data reading on connect() success.
+            # handleNfcIntent() stores data in lastSensorData independently of the
+            # connected flag, so we must still attempt to read even when connect()
+            # returns False (e.g. transient NFC adapter issue or native lib error).
             if not self.connected:
-                if not self.connect():
-                    logger.debug("NFC not connected, no tag nearby")
-                    return None
+                self.connect()   # reconnect attempt — result intentionally ignored
 
             try:
                 # ── Freshness check: has the tag left range? ──────────────

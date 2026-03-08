@@ -14,12 +14,53 @@ from data_management.sensor_data import SensorReading
 _FIELDS = ['timestamp', 'temperature', 'ph', 'glucose', 'tag_id']
 
 
+def _resolve_android_storage() -> str:
+    """Return app-private external storage path on Android.
+
+    Uses ``context.getExternalFilesDir(null)`` — the app's own
+    external-storage sandbox (e.g. /sdcard/Android/data/<pkg>/files/).
+    No WRITE_EXTERNAL_STORAGE permission is required on API 29+ (scoped
+    storage).  Returns '' on non-Android platforms or if resolution fails.
+    """
+    try:
+        from jnius import autoclass
+        PythonActivity = autoclass('org.kivy.android.PythonActivity')
+        ctx = PythonActivity.mActivity.getApplicationContext()
+        ext_dir = ctx.getExternalFilesDir(None)
+        if ext_dir is not None:
+            return str(ext_dir.getAbsolutePath())
+    except Exception:
+        pass
+    return ''
+
+
 class CSVHandler:
-    """Handles reading and writing sensor data to CSV files"""
-    
-    def __init__(self, storage_path: str = './sensor_data'):
-        """Initialize CSV handler"""
-        self.storage_path = Path(storage_path)
+    """Handles reading and writing sensor data to CSV files.
+
+    On Android the data is stored in the app-private external directory
+    (``getExternalFilesDir(null)``) so it is accessible via USB/file-
+    manager without requiring the deprecated WRITE_EXTERNAL_STORAGE
+    permission (API 29+).
+    On desktop it falls back to a local ``./sensor_data/`` folder.
+    """
+
+    def __init__(self, storage_path: str = ''):
+        """Initialize CSV handler.
+
+        Parameters
+        ----------
+        storage_path :
+            Override the storage directory.  Leave empty (default) to use
+            the Android external-files dir on Android, or ``./sensor_data``
+            on desktop.
+        """
+        if storage_path:
+            self.storage_path = Path(storage_path)
+        else:
+            android_path = _resolve_android_storage()
+            self.storage_path = (
+                Path(android_path) if android_path else Path('./sensor_data')
+            )
         self.storage_path.mkdir(parents=True, exist_ok=True)
         
         # Create daily CSV file names

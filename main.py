@@ -7,6 +7,7 @@ Works on Android with real NFC hardware, or on desktop with mock data.
 import os
 import sys
 import logging
+from datetime import datetime
 
 # Configure logging before anything else
 logging.basicConfig(
@@ -17,7 +18,7 @@ logger = logging.getLogger('SensorMonitor')
 
 from kivy.app import App
 from kivy.core.window import Window
-Window.title = "SensorMonitor v1.03"
+Window.title = "SensorMonitor v1.04"
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.gridlayout import GridLayout
@@ -51,7 +52,7 @@ class SensorMonitorApp(App):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.title = "SensorMonitor v1.03"
+        self.title = "SensorMonitor v1.04"
         self.sensor_interface = None
         self.nfc_handler = None
         self.csv_handler = None
@@ -153,6 +154,16 @@ class SensorMonitorApp(App):
 
         self._root.add_widget(main_layout)
 
+        # ── Register dashboard as a SensorData observer ──────────────────────
+        # MainScreen and GraphsScreen register themselves in their own __init__.
+        # DashboardScreen needs an explicit registration here so its live bars
+        # also update the instant new data arrives (observer push > polling).
+        def _dash_observer(reading):
+            if hasattr(self, 'dashboard_screen') and self.dashboard_screen:
+                self.dashboard_screen._apply_reading(
+                    reading.temperature, reading.ph, reading.glucose)
+        self.sensor_data.add_observer(_dash_observer)
+
         # ── Android NFC lifecycle binding ────────────────────────────────────
         # Use p4a's android.activity EventDispatcher to receive onNewIntent
         # callbacks when an NFC tag is tapped while the app is in the foreground.
@@ -170,7 +181,7 @@ class SensorMonitorApp(App):
         Clock.schedule_once(self._initial_connect, 2)
 
         self.data_update_event = Clock.schedule_interval(
-            self.update_sensor_data, 2
+            self.update_sensor_data, 1   # 1 s matches Java periodic re-read interval
         )
 
     def _on_android_new_intent(self, intent) -> None:
@@ -179,7 +190,12 @@ class SensorMonitorApp(App):
         When an intent resolves to sensor data we:
         1. Save immediately to CSV + JSON tap history (tap-triggered storage).
         2. Add to the in-memory SensorData model.
-        3. Notify the Dashboard's 'Last Captured Data' card.
+        3. Notify the Dashboard live bars and 'Last Captured Data' card.
+
+        Data is read directly from the Java bridge first (because
+        handleNfcIntent already stored it in lastSensorData), falling back to
+        sensor_interface.read_sensor_data() if the direct read fails.  This
+        guarantees the UI is updated even when the connected flag is False.
         """
         logger.info("on_new_intent received — routing to NFC handler")
         if not self.nfc_handler:
@@ -189,17 +205,41 @@ class SensorMonitorApp(App):
             logger.debug("NFC intent: no recognised sensor data")
             return
 
-        # ── Tap-triggered storage ────────────────────────────────────
-        data = self.sensor_interface.read_sensor_data()
+        # ── Read data directly from bridge (handleNfcIntent already stored it)
+        data = None
+        try:
+            bridge = self.sensor_interface.bridge
+            if bridge and bridge._java_bridge is not None:
+                sensor_reading = bridge.getSensorReading()
+                tag_id = bridge.getLastTagId()
+                if sensor_reading and len(sensor_reading) >= 3:
+                    data = {
+                        'timestamp':   datetime.now().isoformat(),
+                        'temperature': float(sensor_reading[0]),
+                        'ph':          float(sensor_reading[1]),
+                        'glucose':     float(sensor_reading[2]),
+                        'tag_id':      tag_id,
+                    }
+                    # Mark interface as connected so polling loop keeps working
+                    self.sensor_interface.tag_detected = True
+                    self.sensor_interface.connected    = True
+        except Exception as _e:
+            logger.warning(f"Direct bridge read failed after intent: {_e}")
+
+        # ── Fallback: go through the full read_sensor_data() pipeline
+        if data is None:
+            data = self.sensor_interface.read_sensor_data()
+
+        # ── Tap-triggered storage & UI update ───────────────────────
         if data:
-            # In-memory model
+            # In-memory model (triggers _dash_observer → live bars update)
             self.sensor_data.add_reading(data)
             # Persistent CSV row
             if self.csv_handler:
                 self.csv_handler.save_sensor_reading(data)
-                # Persistent JSON tap event (SharedPreferences equivalent)
+                # Persistent JSON tap event
                 self.csv_handler.save_tap_event(data)
-            # Notify Dashboard 'Last Captured Data' card
+            # Notify Dashboard 'Last Captured Data' card + live bars
             if hasattr(self, 'dashboard_screen') and self.dashboard_screen:
                 self.dashboard_screen.notify_tap(data)
             logger.info(
@@ -207,7 +247,7 @@ class SensorMonitorApp(App):
                 f"pH: {data.get('ph')}  Glu: {data.get('glucose')} mg/dL  "
                 f"Tag: {data.get('tag_id', 'N/A')}")
         else:
-            logger.warning("NFC intent parsed but read_sensor_data() returned None")
+            logger.warning("NFC intent parsed but no sensor data could be retrieved from bridge")
 
     def _initial_connect(self, dt):
         """Try to establish NFC connection after app start."""
@@ -228,17 +268,22 @@ class SensorMonitorApp(App):
             logger.debug(f"Early NFC setup not ready yet: {e}")
 
     def update_sensor_data(self, dt):
-        """Periodically poll for sensor data via NFC."""
+        """Periodically read sensor data via NFC, store it, and save to CSV.
+
+        The observer pattern in SensorData handles propagating new readings
+        to all UI screens (Dashboard, Raw-Data table, Graphs) the instant
+        add_reading() is called — no explicit per-screen push needed here.
+        """
         try:
             data = self.sensor_interface.read_sensor_data()
-            
+
             if data:
-                # Store in sensor data object
+                # Store in sensor-data model (triggers all registered observers)
                 self.sensor_data.add_reading(data)
-                
-                # Save to CSV
+
+                # Persist to CSV (append mode, Android external-files dir)
                 self.csv_handler.save_sensor_reading(data)
-                
+
         except Exception as e:
             logger.error(f"Error updating sensor data: {e}")
     

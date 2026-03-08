@@ -6,7 +6,7 @@ package.domain = com.sensormonitor
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,java
 
-version = 1.03
+version = 1.05
 
 requirements = python3,kivy,pyjnius
 

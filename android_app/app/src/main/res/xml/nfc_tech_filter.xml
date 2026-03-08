@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    NFC tech-list filter for META-DATA in AndroidManifest.
+    Each <tech-list> block is OR-ed; entries within a block are AND-ed.
+    Accepting Ndef, NfcA (ISO14443-3A), and IsoDep (ISO14443-4) covers
+    all NHS 3152 communication modes.
+-->
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+    <tech-list>
+        <tech>android.nfc.tech.Ndef</tech>
+    </tech-list>
+    <tech-list>
+        <tech>android.nfc.tech.NfcA</tech>
+    </tech-list>
+    <tech-list>
+        <tech>android.nfc.tech.IsoDep</tech>
+    </tech-list>
+</resources>

@@ -22,6 +22,7 @@ import android.util.Log;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -30,6 +31,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import android.nfc.TagLostException;
 
 import android.app.PendingIntent;
 import android.content.Intent;
@@ -246,14 +248,18 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
 
     /**
      * Parse health sensor data from raw NDEF/NFC payload bytes.
-     * NHS 3152 payload format:
-     *   Bytes 0-1: Temperature (signed int16, 0.1°C units)
-     *   Bytes 2-3: pH (uint16, 0.01 pH units)
-     *   Bytes 4-5: Glucose (uint16, mg/dL)
+     *
+     * NHS 3152 runs on an ARM Cortex-M0+ core → data is stored in
+     * <b>little-endian</b> byte order (LSB first).
+     *
+     * Binary payload format (6 bytes minimum):
+     *   Bytes 0-1: Temperature (signed int16 LE, 0.1 °C per LSB)
+     *   Bytes 2-3: pH         (unsigned int16 LE, 0.01 pH per LSB)
+     *   Bytes 4-5: Glucose    (unsigned int16 LE, mg/dL)
+     *
+     * Falls back to big-endian when little-endian yields implausible values.
      */
     public float[] parseHealthData(byte[] data) {
-        float[] sensorData = new float[3];  // temp, pH, glucose
-
         try {
             if (data == null || data.length < 6) {
                 Log.w(TAG, "Insufficient data for parsing: " +
@@ -261,33 +267,50 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
                 return null;
             }
 
-            // Temperature (signed 16-bit, 0.1°C resolution)
-            int tempRaw = ((data[0] & 0xFF) << 8) | (data[1] & 0xFF);
-            if ((tempRaw & 0x8000) != 0) {
-                tempRaw = tempRaw - 0x10000;
+            // ── Try little-endian first (NHS3152 native byte order) ─────────
+            float[] sensorData = decodeHealthBytes(data, ByteOrder.LITTLE_ENDIAN);
+            if (sensorData != null && isDataPlausible(sensorData)) {
+                lastSensorData      = sensorData;
+                lastDataTimestampMs = System.currentTimeMillis();
+                Log.i(TAG, String.format(
+                    "Parsed (LE) — Temp: %.1f°C, pH: %.2f, Glucose: %.0f mg/dL",
+                    sensorData[0], sensorData[1], sensorData[2]));
+                return sensorData;
             }
-            sensorData[0] = tempRaw / 10.0f;
 
-            // pH (unsigned 16-bit, 0.01 pH resolution)
-            int phRaw = ((data[2] & 0xFF) << 8) | (data[3] & 0xFF);
-            sensorData[1] = phRaw / 100.0f;
+            // ── Fallback: try big-endian ─────────────────────────────────────
+            Log.d(TAG, "LE parse implausible, retrying with BE");
+            sensorData = decodeHealthBytes(data, ByteOrder.BIG_ENDIAN);
+            if (sensorData != null && isDataPlausible(sensorData)) {
+                lastSensorData      = sensorData;
+                lastDataTimestampMs = System.currentTimeMillis();
+                Log.i(TAG, String.format(
+                    "Parsed (BE) — Temp: %.1f°C, pH: %.2f, Glucose: %.0f mg/dL",
+                    sensorData[0], sensorData[1], sensorData[2]));
+                return sensorData;
+            }
 
-            // Glucose (unsigned 16-bit, mg/dL)
-            int glucoseRaw = ((data[4] & 0xFF) << 8) | (data[5] & 0xFF);
-            sensorData[2] = (float) glucoseRaw;
-
-            lastSensorData = sensorData;
-            lastDataTimestampMs = System.currentTimeMillis();
-            Log.i(TAG, String.format(
-                "Parsed sensor data — Temp: %.1f°C, pH: %.2f, Glucose: %.0f mg/dL",
-                sensorData[0], sensorData[1], sensorData[2]));
-
-            return sensorData;
+            Log.w(TAG, "parseHealthData: data not plausible in either byte order " +
+                       "— raw hex: " + bytesToHex(Arrays.copyOf(data, Math.min(data.length, 8))));
         } catch (Exception e) {
             Log.e(TAG, "Error parsing health data: " + e.getMessage());
         }
-
         return null;
+    }
+
+    /**
+     * Decode a 6-byte NHS3152 binary payload using the specified byte order.
+     *
+     * @param data      Raw payload bytes (must be >= 6 bytes).
+     * @param order     {@link ByteOrder#LITTLE_ENDIAN} or {@link ByteOrder#BIG_ENDIAN}.
+     * @return float[3] {temperature °C, pH, glucose mg/dL}, never null.
+     */
+    private float[] decodeHealthBytes(byte[] data, ByteOrder order) {
+        ByteBuffer buf = ByteBuffer.wrap(data).order(order);
+        float temp    = buf.getShort() / 10.0f;          // signed int16, 0.1 °C per LSB
+        float ph      = (buf.getShort() & 0xFFFF) / 100.0f; // unsigned int16, 0.01 pH per LSB
+        float glucose = (buf.getShort() & 0xFFFF);       // unsigned int16, mg/dL direct
+        return new float[]{temp, ph, glucose};
     }
 
     /**
@@ -315,67 +338,90 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
             Log.i(TAG, "Tag UID: " + bytesToHex(uid));
         }
 
-        // Strategy 1: Try NDEF first (most NHS 3152 configs use NDEF)
-        Log.i(TAG, "→ Trying NDEF read...");
-        if (tryReadNdef(tag)) {
-            Log.i(TAG, "✓ Successfully read NDEF data");
-            startPeriodicRead(tag);   // keep reading every 2s while tag is in range
-            return;
-        }
+        try {
+            // Strategy 1: Try NDEF first (most NHS 3152 configs use NDEF)
+            Log.i(TAG, "→ Trying NDEF read...");
+            if (tryReadNdef(tag)) {
+                Log.i(TAG, "✓ Successfully read NDEF data");
+                startPeriodicRead(tag);   // keep reading every 1s while tag is in range
+                return;
+            }
 
-        // Strategy 2: Try IsoDep (ISO 14443-4) for NHS 3152 APDU communication
-        Log.i(TAG, "→ Trying IsoDep (APDU) read...");
-        if (tryReadIsoDep(tag)) {
-            Log.i(TAG, "✓ Successfully read via IsoDep");
-            startPeriodicRead(tag);
-            return;
-        }
+            // Strategy 2: Try IsoDep (ISO 14443-4) for NHS 3152 APDU communication
+            Log.i(TAG, "→ Trying IsoDep (APDU) read...");
+            if (tryReadIsoDep(tag)) {
+                Log.i(TAG, "✓ Successfully read via IsoDep");
+                startPeriodicRead(tag);
+                return;
+            }
 
-        // Strategy 3: Try raw NFC-A (ISO 14443-3A) memory read
-        Log.i(TAG, "→ Trying NFC-A (raw) read...");
-        if (tryReadNfcA(tag)) {
-            Log.i(TAG, "✓ Successfully read via NFC-A");
-            startPeriodicRead(tag);
-            return;
-        }
+            // Strategy 3: Try raw NFC-A (ISO 14443-3A) memory read
+            Log.i(TAG, "→ Trying NFC-A (raw) read...");
+            if (tryReadNfcA(tag)) {
+                Log.i(TAG, "✓ Successfully read via NFC-A");
+                startPeriodicRead(tag);
+                return;
+            }
 
-        Log.w(TAG, "✗ Could not read sensor data from tag via ANY method");
-        Log.w(TAG, "  This may indicate the tag is not an NHS 3152 or data is corrupted");
+            Log.w(TAG, "✗ Could not read sensor data from tag via ANY method");
+            Log.w(TAG, "  This may indicate the tag is not an NHS 3152 or data is corrupted");
+        } catch (TagLostException e) {
+            Log.i(TAG, "Tag lost during initial read");
+        }
     }
 
+    // How many consecutive non-TagLost failures before we treat the tag as gone.
+    private static final int MAX_CONSECUTIVE_FAILURES = 3;
+    private int consecutiveReadFailures = 0;
+
     /**
-     * Start a background task that re-reads the tag every 2 seconds.
+     * Start a background task that re-reads the tag every 1 second.
      * <p>
-     * The NHS 3152 tag stays in the RF field while held near the phone.
-     * This loop keeps pulling fresh data until the tag leaves range,
-     * at which point the I/O call fails and we clear {@code lastSensorData}.
+     * The NHS3152 tag stays in the RF field while held near the phone.
+     * This loop pulls fresh data continuously so Python always gets
+     * up-to-date values when it polls {@link #getSensorReading()}.
      * <p>
-     * The 2-second interval matches the Python polling interval, ensuring
-     * the Python layer always gets up-to-date values.
+     * Only a definitive {@link TagLostException} (or
+     * {@link #MAX_CONSECUTIVE_FAILURES} consecutive failures) clears
+     * {@code lastSensorData}; transient I/O hiccups keep the last good
+     * value alive so the Python freshness check does not prematurely
+     * signal "tag left range".
      *
      * @param tag The live {@link Tag} object from {@code onTagDiscovered}.
      */
     private void startPeriodicRead(final Tag tag) {
         stopPeriodicRead(); // cancel any leftover task first
+        consecutiveReadFailures = 0;
         periodicReadTask = scheduler.scheduleAtFixedRate(() -> {
             try {
                 boolean ok = tryReadNdef(tag)
                           || tryReadIsoDep(tag)
                           || tryReadNfcA(tag);
-                if (!ok) {
-                    Log.i(TAG, "Periodic re-read: tag no longer responding — sensor left range");
-                    lastSensorData      = null;
-                    lastDataTimestampMs = 0;
-                    stopPeriodicRead();
+                if (ok) {
+                    consecutiveReadFailures = 0;
+                } else {
+                    consecutiveReadFailures++;
+                    Log.d(TAG, "Periodic re-read: no data (failure " +
+                          consecutiveReadFailures + "/" + MAX_CONSECUTIVE_FAILURES + ")");
+                    if (consecutiveReadFailures >= MAX_CONSECUTIVE_FAILURES) {
+                        Log.i(TAG, "Tag unresponsive after " + MAX_CONSECUTIVE_FAILURES +
+                              " attempts — marking tag as gone");
+                        lastSensorData      = null;
+                        lastDataTimestampMs = 0;
+                        stopPeriodicRead();
+                    }
                 }
-            } catch (Exception e) {
-                Log.i(TAG, "Periodic re-read I/O error — tag left range: " + e.getMessage());
+            } catch (TagLostException e) {
+                // Definitive: tag physically left the RF field.
+                Log.i(TAG, "TagLostException in periodic re-read — tag removed from field");
                 lastSensorData      = null;
                 lastDataTimestampMs = 0;
                 stopPeriodicRead();
+            } catch (Exception e) {
+                Log.w(TAG, "Periodic re-read unexpected error: " + e.getMessage());
             }
-        }, 2, 2, TimeUnit.SECONDS);
-        Log.i(TAG, "Periodic re-read started (2s interval)");
+        }, 1, 1, TimeUnit.SECONDS);
+        Log.i(TAG, "Periodic re-read started (1 s interval)");
     }
 
     /** Cancel the periodic re-read task if running. */
@@ -390,7 +436,7 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
     /**
      * Try reading NDEF message from the tag.
      */
-    private boolean tryReadNdef(Tag tag) {
+    private boolean tryReadNdef(Tag tag) throws TagLostException {
         Ndef ndef = Ndef.get(tag);
         if (ndef == null) {
             Log.d(TAG, "Tag does not support NDEF");
@@ -418,12 +464,40 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
                             Log.i(TAG, "RTD_TEXT record value: " + text);
                             float[] data = parseCsvSensorText(text);
                             if (data != null) {
-                                lastSensorData = data;
+                                lastSensorData      = data;
+                                lastDataTimestampMs = System.currentTimeMillis(); // keep freshness alive
                                 ndef.close();
                                 return true;
                             }
                         }
                         continue; // don't fall through to binary parsing for text records
+                    }
+
+                    // ── Priority 1b: MIME text/plain record (TNF_MIME_MEDIA) ───────
+                    // NHS 3152 firmware variants may use text/plain MIME type instead
+                    // of RTD_TEXT. The payload is raw UTF-8 with no status/language byte.
+                    if (record.getTnf() == NdefRecord.TNF_MIME_MEDIA) {
+                        try {
+                            String mimeType = new String(record.getType(), StandardCharsets.US_ASCII);
+                            if (mimeType.startsWith("text/")) {
+                                String text = (payload != null)
+                                        ? new String(payload, StandardCharsets.UTF_8).trim()
+                                        : null;
+                                Log.i(TAG, "MIME " + mimeType + " record value: " + text);
+                                if (text != null && !text.isEmpty()) {
+                                    float[] data = parseCsvSensorText(text);
+                                    if (data != null) {
+                                        lastSensorData      = data;
+                                        lastDataTimestampMs = System.currentTimeMillis();
+                                        ndef.close();
+                                        return true;
+                                    }
+                                }
+                                continue; // don't fall through to binary parsing for text records
+                            }
+                        } catch (Exception e) {
+                            Log.w(TAG, "MIME type check error: " + e.getMessage());
+                        }
                     }
 
                     // ── Priority 2: Custom NHS 3152 binary Health record ('H') ───────
@@ -438,18 +512,42 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
                         }
                     }
 
-                    // ── Priority 3: Any payload >= 6 bytes treated as raw binary ─────
-                    if (payload != null && payload.length >= 6) {
-                        float[] data = parseHealthData(payload);
-                        if (data != null && isDataPlausible(data)) {
-                            Log.i(TAG, "Parsed sensor data from generic NDEF record");
-                            ndef.close();
-                            return true;
+                    // ── Priority 3: Try text parsing first, then binary ─────────────
+                    // Some NHS 3152 configurations use TNF_UNKNOWN or external types
+                    // with a text payload. Try text before binary to avoid misinterpreting
+                    // ASCII bytes as sensor values.
+                    if (payload != null && payload.length >= 3) {
+                        // Try text first (payload looks like printable ASCII/UTF-8)
+                        try {
+                            String textPayload = new String(payload, StandardCharsets.UTF_8).trim();
+                            if (!textPayload.isEmpty() && isPrintableAscii(textPayload)) {
+                                float[] data = parseCsvSensorText(textPayload);
+                                if (data != null && isDataPlausible(data)) {
+                                    Log.i(TAG, "Parsed sensor data from text payload in generic NDEF record");
+                                    lastSensorData      = data;
+                                    lastDataTimestampMs = System.currentTimeMillis();
+                                    ndef.close();
+                                    return true;
+                                }
+                            }
+                        } catch (Exception ignored) {}
+
+                        // Then try binary (payload >= 6 bytes as raw sensor bytes)
+                        if (payload.length >= 6) {
+                            float[] data = parseHealthData(payload);
+                            if (data != null && isDataPlausible(data)) {
+                                Log.i(TAG, "Parsed sensor data from generic NDEF record (binary)");
+                                ndef.close();
+                                return true;
+                            }
                         }
                     }
                 }
             }
             ndef.close();
+        } catch (TagLostException e) {
+            Log.i(TAG, "TagLost during NDEF read");
+            throw e;
         } catch (Exception e) {
             Log.e(TAG, "Error reading NDEF: " + e.getMessage());
         }
@@ -461,7 +559,7 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
      * Try reading via IsoDep (ISO 14443-4 / ISO-DEP) for NHS 3152.
      * NHS 3152 supports APDU commands for reading sensor memory.
      */
-    private boolean tryReadIsoDep(Tag tag) {
+    private boolean tryReadIsoDep(Tag tag) throws TagLostException {
         IsoDep isoDep = IsoDep.get(tag);
         if (isoDep == null) {
             Log.d(TAG, "Tag does not support IsoDep");
@@ -509,6 +607,9 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
             }
 
             isoDep.close();
+        } catch (TagLostException e) {
+            Log.i(TAG, "TagLost during IsoDep read");
+            throw e;
         } catch (Exception e) {
             Log.e(TAG, "Error reading IsoDep: " + e.getMessage());
         }
@@ -520,7 +621,7 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
      * Try reading via NFC-A (ISO 14443-3A) — direct memory read for NHS 3152.
      * NHS 3152 stores data in EEPROM accessible via NFC READ commands.
      */
-    private boolean tryReadNfcA(Tag tag) {
+    private boolean tryReadNfcA(Tag tag) throws TagLostException {
         NfcA nfcA = NfcA.get(tag);
         if (nfcA == null) {
             Log.d(TAG, "Tag does not support NFC-A");
@@ -547,6 +648,9 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
             }
 
             nfcA.close();
+        } catch (TagLostException e) {
+            Log.i(TAG, "TagLost during NFC-A read");
+            throw e;
         } catch (Exception e) {
             Log.e(TAG, "Error reading NFC-A: " + e.getMessage());
         }
@@ -556,16 +660,35 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
 
     /**
      * Sanity-check parsed sensor data to avoid interpreting garbage bytes.
+     * Ranges are intentionally wide to accommodate all NHS 3152 calibration
+     * states and edge cases (e.g. hypoglycaemia glucose < 30 mg/dL).
      */
     private boolean isDataPlausible(float[] data) {
         if (data == null || data.length < 3) return false;
         float temp = data[0];
         float ph = data[1];
         float glucose = data[2];
-        // Accepted sensor ranges: temp 0-60 °C, pH 0-14, glucose 30-250 mg/dL
-        return (temp >= 0.0f && temp <= 60.0f) &&
+        // Wide accepted ranges: temp -10 to 80 °C (allows fever/cold extremes),
+        // pH 0-14, glucose 0-500 mg/dL (covers hypo to extreme hyperglycaemia).
+        return (temp >= -10.0f && temp <= 80.0f) &&
                (ph >= 0.0f && ph <= 14.0f) &&
-               (glucose >= 30.0f && glucose <= 250.0f);
+               (glucose >= 0.0f && glucose <= 500.0f);
+    }
+
+    /**
+     * Return true if every character in {@code s} is in the printable ASCII
+     * range (0x20–0x7E) or a common whitespace character.  Used to detect
+     * text-format payloads before attempting binary parsing.
+     */
+    private static boolean isPrintableAscii(String s) {
+        if (s == null || s.isEmpty()) return false;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c >= 0x20 && c <= 0x7E) continue;  // printable ASCII
+            if (c == '\t' || c == '\n' || c == '\r') continue; // whitespace
+            return false; // non-printable / high byte → binary data
+        }
+        return true;
     }
 
     /**
@@ -871,7 +994,14 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
                 messages[i] = (NdefMessage) rawMessages[i];
             }
             Log.i(TAG, "Intent carries " + messages.length + " NDEF message(s)");
-            if (processNdefMessages(messages)) return true;
+            if (processNdefMessages(messages)) {
+                // Ensure freshness timestamp is always set when data is stored
+                // (parseCsvSensorText sets lastSensorData but not the timestamp).
+                if (lastDataTimestampMs == 0) {
+                    lastDataTimestampMs = System.currentTimeMillis();
+                }
+                return true;
+            }
         }
 
         // ── Step 2: Fallback — use the raw Tag object ─────────────────────
@@ -895,6 +1025,7 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
     /**
      * Iterate an array of {@link NdefMessage} objects from an intent, trying
      * RTD_TEXT decoding first, then falling back to binary NHS 3152 parsing.
+     * Always updates {@code lastDataTimestampMs} when data is stored.
      */
     private boolean processNdefMessages(NdefMessage[] messages) {
         for (NdefMessage message : messages) {
@@ -908,18 +1039,57 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
                         Log.i(TAG, "processNdefMessages — RTD_TEXT: \"" + text + "\"");
                         float[] data = parseCsvSensorText(text);
                         if (data != null) {
-                            lastSensorData = data;
+                            lastSensorData      = data;
+                            lastDataTimestampMs = System.currentTimeMillis(); // keep freshness alive
                             return true;
                         }
                     }
                     continue; // don't fall through to binary parsing for text records
                 }
 
+                // MIME text/* — raw UTF‐8 payload, no status/lang‑code prefix
+                if (record.getTnf() == NdefRecord.TNF_MIME_MEDIA) {
+                    try {
+                        String mimeType = new String(record.getType(), StandardCharsets.US_ASCII);
+                        if (mimeType.startsWith("text/")) {
+                            byte[] payload = record.getPayload();
+                            if (payload != null && payload.length > 0) {
+                                String text = new String(payload, StandardCharsets.UTF_8).trim();
+                                Log.i(TAG, "processNdefMessages — MIME " + mimeType + ": \"" + text + "\"");
+                                float[] data = parseCsvSensorText(text);
+                                if (data != null) {
+                                    lastSensorData      = data;
+                                    lastDataTimestampMs = System.currentTimeMillis();
+                                    return true;
+                                }
+                            }
+                            continue; // don't fall through to binary for text MIME
+                        }
+                    } catch (Exception e) {
+                        Log.w(TAG, "processNdefMessages MIME check error: " + e.getMessage());
+                    }
+                }
+
                 // Binary NHS 3152 payload (any other record type)
+                // Try text first in case it is a printable ASCII payload without recognised type.
                 byte[] payload = record.getPayload();
-                if (payload != null && payload.length >= 6) {
-                    float[] data = parseHealthData(payload);
-                    if (data != null && isDataPlausible(data)) return true;
+                if (payload != null && payload.length >= 3) {
+                    try {
+                        String textPayload = new String(payload, StandardCharsets.UTF_8).trim();
+                        if (!textPayload.isEmpty() && isPrintableAscii(textPayload)) {
+                            float[] data = parseCsvSensorText(textPayload);
+                            if (data != null && isDataPlausible(data)) {
+                                lastSensorData      = data;
+                                lastDataTimestampMs = System.currentTimeMillis();
+                                return true;
+                            }
+                        }
+                    } catch (Exception ignored) {}
+
+                    if (payload.length >= 6) {
+                        float[] data = parseHealthData(payload); // parseHealthData updates timestamp
+                        if (data != null && isDataPlausible(data)) return true;
+                    }
                 }
             }
         }
@@ -985,28 +1155,65 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
     }
 
     /**
-     * Parse a comma-separated sensor value string into {@code float[3]}.
+     * Parse a sensor value string into {@code float[3]}.
      *
-     * <p>Expected format: {@code "temperature,ph,glucose"}
-     * e.g. {@code "36.6,7.40,95"}.  Values are validated against plausible
-     * physiological ranges via {@link #isDataPlausible(float[])}.</p>
+     * <p>Supports multiple text formats written by NHS3152 firmware variants:</p>
+     * <ul>
+     *   <li>Plain CSV: {@code "36.6,7.40,95"}</li>
+     *   <li>Semicolon-separated: {@code "36.6;7.40;95"}</li>
+     *   <li>Labeled format: {@code "T:36.6,pH:7.40,G:95"} or
+     *       {@code "Temp=36.6 pH=7.40 Glucose=95"}</li>
+     * </ul>
+     *
+     * <p>Values are validated against physiological ranges via
+     * {@link #isDataPlausible(float[])}.</p>
      *
      * @param text Decoded text from an RTD_TEXT record.
-     * @return {@code float[3]} {temperature, pH, glucose}, or {@code null} if
-     *         the string is not a valid sensor CSV or values are implausible.
+     * @return {@code float[3]} {temperature °C, pH, glucose mg/dL}, or
+     *         {@code null} if not a valid sensor string or values are implausible.
      */
     private float[] parseCsvSensorText(String text) {
-        try {
-            String[] parts = text.trim().split(",");
-            if (parts.length >= 3) {
+        if (text == null || text.isEmpty()) return null;
+        String trimmed = text.trim();
+
+        // ── Strategy 1: plain CSV / semicolon-separated (no labels) ─────────
+        // Split on comma, semicolon, or whitespace runs.
+        String[] parts = trimmed.split("[,;\\s]+");
+        if (parts.length >= 3) {
+            try {
                 float[] data = {
                     Float.parseFloat(parts[0].trim()),
                     Float.parseFloat(parts[1].trim()),
                     Float.parseFloat(parts[2].trim())
                 };
-                return isDataPlausible(data) ? data : null;
+                if (isDataPlausible(data)) return data;
+            } catch (NumberFormatException ignored) {}
+        }
+
+        // ── Strategy 2: labeled key=value or key:value pairs ─────────────────
+        // Handles: "T:36.5,pH:7.40,G:95" or "Temp=36.5 pH=7.40 Glucose=95"
+        float temp = Float.NaN, ph = Float.NaN, glucose = Float.NaN;
+        for (String token : trimmed.split("[,;\\s]+")) {
+            String[] kv = token.split("[=:]", 2);
+            if (kv.length == 2) {
+                String key = kv[0].trim().toLowerCase();
+                try {
+                    float val = Float.parseFloat(kv[1].trim());
+                    if (key.startsWith("t") || key.contains("temp")) {
+                        temp = val;
+                    } else if (key.startsWith("p") || key.contains("ph")) {
+                        ph = val;
+                    } else if (key.startsWith("g") || key.contains("glu")) {
+                        glucose = val;
+                    }
+                } catch (NumberFormatException ignored) {}
             }
-        } catch (NumberFormatException ignored) { /* not sensor CSV — ignore */ }
+        }
+        if (!Float.isNaN(temp) && !Float.isNaN(ph) && !Float.isNaN(glucose)) {
+            float[] data = {temp, ph, glucose};
+            if (isDataPlausible(data)) return data;
+        }
+
         return null;
     }
 }

@@ -42,7 +42,7 @@ class DashboardScreen(BoxLayout):
         self.update_event = None
 
         # ── Title ─────────────────────────────────────────────────────────────
-        title = Label(text='SensorMonitor v1.03',
+        title = Label(text='SensorMonitor v1.04',
                       size_hint_y=0.08, bold=True, font_size='20sp')
         self.add_widget(title)
 
@@ -168,31 +168,48 @@ class DashboardScreen(BoxLayout):
     # ── NFC Tap notification (called from main.py on_new_intent) ────────
 
     def notify_tap(self, data: dict) -> None:
-        """Update the 'Last Captured Data' card with data from a real NFC tap.
+        """Update 'Last Captured Data' card AND live readings bars with NFC tap data.
 
         Called by ``SensorMonitorApp._on_android_new_intent`` whenever the
         foreground dispatch delivers a successfully parsed NFC intent.
-        This is the ONLY path that updates the Last Captured card.
+        Updates both the last-captured card AND the live temperature / pH /
+        glucose progress bars so data is always shown on tap.
         """
         try:
             ts = data.get('timestamp', '')
             if ts:
-                # Pretty-print: 2026-03-05T14:22:01.123456 → 14:22:01
                 try:
                     ts_obj = datetime.fromisoformat(ts)
                     ts = ts_obj.strftime('%Y-%m-%d  %H:%M:%S')
                 except Exception:
                     pass
+
+            temp    = data.get('temperature', None)
+            ph      = data.get('ph', None)
+            glucose = data.get('glucose', None)
+
+            # ── Update Last Captured Data card ────────────────────────────
             self.last_time_label.text   = f'Time:     {ts}'
-            self.last_values_label.text = (
-                f"Temp: {data.get('temperature', '--'):.1f} °C  "
-                f"pH: {data.get('ph', '--'):.2f}  "
-                f"Glu: {data.get('glucose', '--'):.0f} mg/dL"
-            )
+            if temp is not None and ph is not None and glucose is not None:
+                self.last_values_label.text = (
+                    f"Temp: {float(temp):.1f} °C  "
+                    f"pH: {float(ph):.2f}  "
+                    f"Glu: {float(glucose):.0f} mg/dL"
+                )
+            else:
+                self.last_values_label.text = 'Temp: --  |  pH: --  |  Glu: --'
+
             tag_id = data.get('tag_id', '') or 'N/A'
             self.last_tagid_label.text  = f'Tag ID:   {tag_id}'
 
-            # Also highlight the status bar
+            # ── Also update live readings bars immediately ─────────────────
+            # (The observer pattern via sensor_data.add_reading handles this too,
+            # but updating here ensures the bars refresh on the same Kivy tick
+            # as notify_tap, even if the observer fires slightly later.)
+            if temp is not None and ph is not None and glucose is not None:
+                self._apply_reading(float(temp), float(ph), float(glucose))
+
+            # ── Status bar ────────────────────────────────────────────────
             self.status_label.text  = '\u2713 NHS 3152 tag captured successfully'
             self.status_label.color = (0.3, 1, 0.3, 1)
             self._has_data = True
@@ -205,9 +222,9 @@ class DashboardScreen(BoxLayout):
         self.start_monitoring(None)
 
     def start_monitoring(self, instance):
-        """Start the 2-second polling loop."""
+        """Start the 1-second polling loop."""
         if self.update_event is None:
-            self.update_event = Clock.schedule_interval(self.update_dashboard, 2)
+            self.update_event = Clock.schedule_interval(self.update_dashboard, 1)
             if not self._has_data:
                 self.status_label.text  = 'Scanning for NHS 3152 sensor...'
                 self.status_label.color = (1, 0.8, 0.2, 1)
@@ -232,29 +249,51 @@ class DashboardScreen(BoxLayout):
         self.glucose_bar.value  = 0
 
     def update_dashboard(self, dt):
-        """Periodic poll: update the live readings bar from SensorData."""
-        readings = self.sensor_data.get_all_readings()
-        if readings:
-            latest = readings[-1]
+        """Periodic poll: update the live readings bar with the freshest data.
 
+        Queries ``sensor_interface.read_sensor_data()`` directly so the display
+        reflects whatever the Java periodic re-read last stored in
+        ``lastSensorData``, with no extra polling lag.  Falls back to the stored
+        ``sensor_data`` history when no live data is available (e.g. tag not in
+        range but a previous reading exists).
+        """
+        live = None
+        if self.sensor_interface:
+            try:
+                live = self.sensor_interface.read_sensor_data()
+            except Exception:
+                pass
+
+        if live:
+            self._apply_reading(
+                live['temperature'], live['ph'], live['glucose'])
             if not self._has_data:
                 self._has_data = True
                 self.status_label.text  = 'NHS 3152 sensor connected — live data'
                 self.status_label.color = (0.3, 1, 0.3, 1)
+            return
 
-            temp = latest.temperature
-            self.temp_label.text = f'Temp: {temp:.1f} °C'
-            self.temp_bar.value  = max(0, min(temp, 60))
-
-            ph = latest.ph
-            self.ph_label.text = f'pH:   {ph:.2f}'
-            self.ph_bar.value  = max(0, min(ph, 14.0))
-
-            glucose = latest.glucose
-            self.glucose_label.text = f'Glu:  {glucose:.1f} mg/dL'
-            self.glucose_bar.value  = max(30, min(glucose, 250))
+        # No live data — fall back to the most recent stored reading
+        readings = self.sensor_data.get_all_readings()
+        if readings:
+            latest = readings[-1]
+            self._apply_reading(
+                latest.temperature, latest.ph, latest.glucose)
+            if not self._has_data:
+                self._has_data = True
+                self.status_label.text  = 'NHS 3152 sensor connected — live data'
+                self.status_label.color = (0.3, 1, 0.3, 1)
         else:
             self._show_null_values()
             self.status_label.text  = 'Waiting for NHS 3152 sensor...'
             self.status_label.color = (1, 0.8, 0.2, 1)
+
+    def _apply_reading(self, temp: float, ph: float, glucose: float) -> None:
+        """Push one set of sensor values into all live-display widgets."""
+        self.temp_label.text    = f'Temp: {temp:.1f} °C'
+        self.temp_bar.value     = max(0, min(temp, 60))
+        self.ph_label.text      = f'pH:   {ph:.2f}'
+        self.ph_bar.value       = max(0, min(ph, 14.0))
+        self.glucose_label.text = f'Glu:  {glucose:.1f} mg/dL'
+        self.glucose_bar.value  = max(0, min(glucose, 250))
     

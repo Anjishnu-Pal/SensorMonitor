@@ -45,14 +45,42 @@ def _parse_timestamp(value) -> datetime:
 
 
 class SensorData:
-    """Manages in-memory sensor data"""
-    
+    """Manages in-memory sensor data with reactive observer support.
+
+    Any object can register a callback via ``add_observer(fn)``.
+    The callback ``fn(reading: SensorReading)`` is invoked synchronously
+    on the Kivy main thread the instant a new reading is committed, so
+    UI widgets are refreshed within the same scheduler tick — satisfying
+    the "instant update within the 2-second window" requirement.
+    """
+
     def __init__(self):
         self.readings: List[SensorReading] = []
-        self.max_memory_readings = 10000  # Keep last 10000 readings in memory
-    
+        self.max_memory_readings = 10000
+        self._observers: list = []  # list of callables: fn(SensorReading) -> None
+
+    # ── Observer registration ────────────────────────────────────────────
+
+    def add_observer(self, callback) -> None:
+        """Register a callback to be invoked immediately when a new reading arrives.
+
+        Parameters
+        ----------
+        callback : callable
+            fn(reading: SensorReading) -> None.
+            Always called on the Kivy main thread (Clock callbacks are
+            main-thread), so it is safe to update UI widgets directly.
+        """
+        if callback not in self._observers:
+            self._observers.append(callback)
+
+    def remove_observer(self, callback) -> None:
+        """Unregister a previously registered observer."""
+        if callback in self._observers:
+            self._observers.remove(callback)
+
     def add_reading(self, data: dict) -> None:
-        """Add a new sensor reading from a dict (handles string timestamps)."""
+        """Add a new sensor reading and immediately notify all observers."""
         raw_ts = data.get('timestamp', datetime.now())
         reading = SensorReading(
             timestamp=_parse_timestamp(raw_ts),
@@ -62,10 +90,17 @@ class SensorData:
             tag_id=str(data.get('tag_id', '')),
         )
         self.readings.append(reading)
-        
+
         # Trim old readings if necessary
         if len(self.readings) > self.max_memory_readings:
             self.readings = self.readings[-self.max_memory_readings:]
+
+        # ── Reactive push: notify all registered observers immediately ────
+        for cb in list(self._observers):
+            try:
+                cb(reading)
+            except Exception:
+                pass
     
     def get_all_readings(self) -> List[SensorReading]:
         """Get all stored readings"""
