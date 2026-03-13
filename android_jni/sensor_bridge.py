@@ -5,8 +5,9 @@ This module wraps the Java SensorBridge class so Python/Kivy can access Android 
 
 import os
 import sys
+import struct
 import logging
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +148,10 @@ class SensorBridge:
         """
         Get the latest sensor reading from the Java bridge.
         Returns [temperature, ph, glucose] or None if no data available.
+
+        Primary path: Java float[] from lastSensorData (already parsed + validated).
+        Fallback path: raw bytes from readRawData() → calibrate_raw_bytes() for an
+        independent Python-side cross-check whenever the Java path failed.
         """
         if _ANDROID and self._java_bridge:
             try:
@@ -156,11 +161,104 @@ class SensorBridge:
                     result = [float(java_data[i]) for i in range(len(java_data))]
                     self._last_sensor_data = result
                     return result
+
+                # ── Fallback: try raw bytes path ──────────────────────────────
+                # readRawData() calls nativeReadData() which re-encodes the last
+                # parsed values as a 6-byte big-endian buffer.  If the Java float[]
+                # is temporarily unavailable (e.g. race condition on first read),
+                # we decode it ourselves with the Python calibration engine.
+                raw = self._java_bridge.readRawData()
+                if raw is not None:
+                    raw_bytes = bytes([raw[i] & 0xFF for i in range(len(raw))])
+                    result = self.calibrate_raw_bytes(raw_bytes)
+                    if result:
+                        self._last_sensor_data = result
+                        logger.debug("[SensorBridge] Python fallback calibration used")
+                        return result
                 return None
             except Exception as e:
                 logger.error(f"[SensorBridge] getSensorReading error: {e}")
                 return None
         else:
+            return None
+
+    # ── Python-side NHS3152 Calibration Engine ───────────────────────────────
+
+    # NHS3152 sensor calibration constants (NXP NHS3152 application note)
+    _TEMP_SCALE  = 10.0      # 0.1 °C per LSB  (int16, big-endian)
+    _PH_SCALE    = 100.0     # 0.01 pH per LSB (uint16, big-endian)
+    _GLU_SCALE   = 1.0       # 1 mg/dL per LSB (uint16, big-endian)
+
+    # Plausibility bounds — must match Java isDataPlausible():
+    # temp 0-60 °C, pH 0-14, glucose 30-500 mg/dL
+    _TEMP_MIN, _TEMP_MAX    = 0.0, 60.0
+    _PH_MIN, _PH_MAX        = 0.0, 14.0
+    _GLU_MIN, _GLU_MAX      = 30.0, 500.0
+
+    @staticmethod
+    def calibrate_raw_bytes(raw: bytes,
+                            temp_offset: float = 0.0) -> Optional[List[float]]:
+        """Convert a raw 6-byte NHS3152 NFC payload to physical units.
+
+        This is the Python-side twin of SensorBridge.java ``decodeHealthBytes``
+        + NHS3152 calibration math.  It operates independently of the Java layer
+        and can be used to cross-check Java-parsed values or as a pure-Python
+        fallback on platforms without a Java bridge.
+
+        Wire format (big-endian network byte order):
+          Bytes 0-1:  Temperature  — signed int16, 0.1 °C per LSB
+          Bytes 2-3:  pH           — uint16,       0.01 pH per LSB
+          Bytes 4-5:  Glucose      — uint16,       1 mg/dL per LSB
+
+        Calibration formulas:
+          Temperature (°C)  = raw_int16 / 10.0 + temp_offset
+          pH                = raw_uint16 / 100.0
+          Glucose (mg/dL)   = raw_uint16  (direct, no scale)
+
+        Parameters
+        ----------
+        raw : bytes
+            Exactly 6 bytes from the NHS3152 NFC tag SRAM.
+        temp_offset : float
+            Optional signed temperature compensation applied after scaling
+            (accounts for chip self-heating or sensor placement offset).
+
+        Returns
+        -------
+        list[float] or None
+            [temperature_C, pH, glucose_mg_dL] if plausible, else None.
+        """
+        if raw is None or len(raw) < 6:
+            logger.debug("[SensorBridge] calibrate_raw_bytes: payload too short")
+            return None
+
+        try:
+            # ── Unpack 6 bytes: big-endian signed int16 + two unsigned int16 ──
+            temp_raw, ph_raw, glu_raw = struct.unpack('>hHH', raw[:6])
+
+            # ── Apply NHS3152 scaling factors ─────────────────────────────────
+            temperature = temp_raw / SensorBridge._TEMP_SCALE + temp_offset
+            ph          = ph_raw   / SensorBridge._PH_SCALE
+            glucose     = float(glu_raw) * SensorBridge._GLU_SCALE
+
+            # ── Plausibility gate — reject garbage / uninitialized SRAM ──────
+            if not (SensorBridge._TEMP_MIN <= temperature <= SensorBridge._TEMP_MAX):
+                logger.debug(f"[SensorBridge] calibrate: temp {temperature:.1f}°C out of range")
+                return None
+            if not (SensorBridge._PH_MIN <= ph <= SensorBridge._PH_MAX):
+                logger.debug(f"[SensorBridge] calibrate: pH {ph:.2f} out of range")
+                return None
+            if not (SensorBridge._GLU_MIN <= glucose <= SensorBridge._GLU_MAX):
+                logger.debug(f"[SensorBridge] calibrate: glucose {glucose:.0f} mg/dL out of range")
+                return None
+
+            logger.debug(
+                f"[SensorBridge] calibrate_raw_bytes OK — "
+                f"T={temperature:.1f}°C  pH={ph:.2f}  Glu={glucose:.0f} mg/dL")
+            return [temperature, ph, glucose]
+
+        except struct.error as e:
+            logger.error(f"[SensorBridge] calibrate_raw_bytes struct error: {e}")
             return None
 
     def updateConfig(self, config: Dict) -> bool:

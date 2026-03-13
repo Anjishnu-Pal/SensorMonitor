@@ -9,6 +9,7 @@ from kivy.uix.button import Button
 from kivy.clock import Clock
 from kivy.uix.progressbar import ProgressBar
 from kivy.graphics import Color, RoundedRectangle
+from kivy.properties import StringProperty, NumericProperty
 from datetime import datetime
 
 
@@ -28,7 +29,26 @@ class _Card(BoxLayout):
 
 class DashboardScreen(BoxLayout):
     """Live dashboard displaying current sensor readings, scan controls,
-    and a 'Last Captured Data' card updated on every NFC tap."""
+    and a 'Last Captured Data' card updated on every NFC tap.
+
+    Kivy Properties are used for all mutable display values so the Kivy
+    binding system propagates changes to widgets automatically and safely
+    on the main thread — preventing the manual setText() anti-pattern.
+    """
+
+    # ── Kivy reactive properties (class-level) ───────────────────────────────
+    # Any assignment to these triggers automatic label refresh via bind().
+    status_text  = StringProperty('Waiting for NHS 3152 sensor...')
+    temp_text    = StringProperty('Temp: -- °C')
+    ph_text      = StringProperty('pH:   --')
+    glucose_text = StringProperty('Glu:  -- mg/dL')
+    temp_value   = NumericProperty(0.0)
+    ph_value     = NumericProperty(0.0)
+    glucose_value= NumericProperty(0.0)
+
+    last_time_text   = StringProperty('Time:     --')
+    last_values_text = StringProperty('Temp: --  |  pH: --  |  Glu: --')
+    last_tagid_text  = StringProperty('Tag ID:   --')
 
     def __init__(self, sensor_interface, sensor_data, **kwargs):
         super().__init__(**kwargs)
@@ -42,15 +62,16 @@ class DashboardScreen(BoxLayout):
         self.update_event = None
 
         # ── Title ─────────────────────────────────────────────────────────────
-        title = Label(text='SensorMonitor v1.04',
+        title = Label(text='SensorMonitor v1.06',
                       size_hint_y=0.08, bold=True, font_size='20sp')
         self.add_widget(title)
 
         # ── NFC Status Bar ─────────────────────────────────────────────
         self.status_label = Label(
-            text='Waiting for NHS 3152 sensor...',
+            text=self.status_text,
             size_hint_y=0.06, font_size='12sp', color=(1, 0.8, 0.2, 1))
         self.add_widget(self.status_label)
+        self.bind(status_text=lambda inst, v: setattr(self.status_label, 'text', v))
 
         # ── SCAN NFC Button (prominent) ────────────────────────────────
         scan_btn = Button(
@@ -70,25 +91,31 @@ class DashboardScreen(BoxLayout):
                   height=22, font_size='13sp', color=(0.7, 0.9, 1, 1)))
 
         temp_row = BoxLayout(size_hint_y=None, height=42, spacing=6)
-        self.temp_label = Label(text='Temp: -- °C', size_hint_x=0.35, font_size='14sp')
-        self.temp_bar   = ProgressBar(max=60, value=0, size_hint_x=0.65)
+        self.temp_label = Label(text=self.temp_text, size_hint_x=0.35, font_size='14sp')
+        self.temp_bar   = ProgressBar(max=60, value=self.temp_value, size_hint_x=0.65)
         temp_row.add_widget(self.temp_label)
         temp_row.add_widget(self.temp_bar)
         readings_card.add_widget(temp_row)
+        self.bind(temp_text=lambda i, v: setattr(self.temp_label, 'text', v))
+        self.bind(temp_value=lambda i, v: setattr(self.temp_bar, 'value', v))
 
         ph_row = BoxLayout(size_hint_y=None, height=42, spacing=6)
-        self.ph_label = Label(text='pH:   --', size_hint_x=0.35, font_size='14sp')
-        self.ph_bar   = ProgressBar(max=14, value=0, size_hint_x=0.65)
+        self.ph_label = Label(text=self.ph_text, size_hint_x=0.35, font_size='14sp')
+        self.ph_bar   = ProgressBar(max=14, value=self.ph_value, size_hint_x=0.65)
         ph_row.add_widget(self.ph_label)
         ph_row.add_widget(self.ph_bar)
         readings_card.add_widget(ph_row)
+        self.bind(ph_text=lambda i, v: setattr(self.ph_label, 'text', v))
+        self.bind(ph_value=lambda i, v: setattr(self.ph_bar, 'value', v))
 
         glu_row = BoxLayout(size_hint_y=None, height=42, spacing=6)
-        self.glucose_label = Label(text='Glu:  -- mg/dL', size_hint_x=0.35, font_size='14sp')
-        self.glucose_bar   = ProgressBar(max=250, value=0, size_hint_x=0.65)
+        self.glucose_label = Label(text=self.glucose_text, size_hint_x=0.35, font_size='14sp')
+        self.glucose_bar   = ProgressBar(max=500, value=self.glucose_value, size_hint_x=0.65)
         glu_row.add_widget(self.glucose_label)
         glu_row.add_widget(self.glucose_bar)
         readings_card.add_widget(glu_row)
+        self.bind(glucose_text=lambda i, v: setattr(self.glucose_label, 'text', v))
+        self.bind(glucose_value=lambda i, v: setattr(self.glucose_bar, 'value', v))
 
         self.add_widget(readings_card)
 
@@ -103,28 +130,31 @@ class DashboardScreen(BoxLayout):
                   font_size='13sp', color=(0.3, 1, 0.6, 1)))
 
         self.last_time_label = Label(
-            text='Time:     --',
+            text=self.last_time_text,
             size_hint_y=None, height=26, font_size='12sp',
             color=(0.9, 0.9, 0.9, 1), halign='left')
         self.last_time_label.bind(
             size=lambda w, _: setattr(w, 'text_size', (w.width, None)))
         last_card.add_widget(self.last_time_label)
+        self.bind(last_time_text=lambda i, v: setattr(self.last_time_label, 'text', v))
 
         self.last_values_label = Label(
-            text='Temp: --  |  pH: --  |  Glu: --',
+            text=self.last_values_text,
             size_hint_y=None, height=26, font_size='12sp',
             color=(0.9, 0.9, 0.9, 1), halign='left')
         self.last_values_label.bind(
             size=lambda w, _: setattr(w, 'text_size', (w.width, None)))
         last_card.add_widget(self.last_values_label)
+        self.bind(last_values_text=lambda i, v: setattr(self.last_values_label, 'text', v))
 
         self.last_tagid_label = Label(
-            text='Tag ID:   --',
+            text=self.last_tagid_text,
             size_hint_y=None, height=26, font_size='12sp',
             color=(0.7, 0.7, 0.7, 1), halign='left')
         self.last_tagid_label.bind(
             size=lambda w, _: setattr(w, 'text_size', (w.width, None)))
         last_card.add_widget(self.last_tagid_label)
+        self.bind(last_tagid_text=lambda i, v: setattr(self.last_tagid_label, 'text', v))
 
         self.add_widget(last_card)
 
@@ -189,29 +219,23 @@ class DashboardScreen(BoxLayout):
             glucose = data.get('glucose', None)
 
             # ── Update Last Captured Data card ────────────────────────────
-            self.last_time_label.text   = f'Time:     {ts}'
+            self.last_time_text   = f'Time:     {ts}'
             if temp is not None and ph is not None and glucose is not None:
-                self.last_values_label.text = (
+                self.last_values_text = (
                     f"Temp: {float(temp):.1f} °C  "
                     f"pH: {float(ph):.2f}  "
                     f"Glu: {float(glucose):.0f} mg/dL"
                 )
             else:
-                self.last_values_label.text = 'Temp: --  |  pH: --  |  Glu: --'
+                self.last_values_text = 'Temp: --  |  pH: --  |  Glu: --'
 
             tag_id = data.get('tag_id', '') or 'N/A'
-            self.last_tagid_label.text  = f'Tag ID:   {tag_id}'
+            self.last_tagid_text  = f'Tag ID:   {tag_id}'
 
-            # ── Also update live readings bars immediately ─────────────────
-            # (The observer pattern via sensor_data.add_reading handles this too,
-            # but updating here ensures the bars refresh on the same Kivy tick
-            # as notify_tap, even if the observer fires slightly later.)
             if temp is not None and ph is not None and glucose is not None:
                 self._apply_reading(float(temp), float(ph), float(glucose))
 
-            # ── Status bar ────────────────────────────────────────────────
-            self.status_label.text  = '\u2713 NHS 3152 tag captured successfully'
-            self.status_label.color = (0.3, 1, 0.3, 1)
+            self.status_text = '\u2713 NHS 3152 tag captured successfully'
             self._has_data = True
         except Exception as e:
             self.status_label.text = f'Tap notification error: {e}'
@@ -222,41 +246,31 @@ class DashboardScreen(BoxLayout):
         self.start_monitoring(None)
 
     def start_monitoring(self, instance):
-        """Start the 1-second polling loop."""
+        """Start the 2-second polling loop."""
         if self.update_event is None:
-            self.update_event = Clock.schedule_interval(self.update_dashboard, 1)
+            self.update_event = Clock.schedule_interval(self.update_dashboard, 2)
             if not self._has_data:
-                self.status_label.text  = 'Scanning for NHS 3152 sensor...'
-                self.status_label.color = (1, 0.8, 0.2, 1)
+                self.status_text  = 'Scanning for NHS 3152 sensor...'
             else:
-                self.status_label.text  = 'Monitoring active — sensor connected'
-                self.status_label.color = (0.5, 1, 0.5, 1)
+                self.status_text  = 'Monitoring active — sensor connected'
 
     def stop_monitoring(self, instance):
         """Stop the polling loop."""
         if self.update_event:
             self.update_event.cancel()
             self.update_event = None
-        self.status_label.text  = 'Monitoring stopped'
-        self.status_label.color = (1, 0.5, 0.5, 1)
+        self.status_text = 'Monitoring stopped'
 
     def _show_null_values(self):
-        self.temp_label.text    = 'Temp: -- °C'
-        self.temp_bar.value     = 0
-        self.ph_label.text      = 'pH:   --'
-        self.ph_bar.value       = 0
-        self.glucose_label.text = 'Glu:  -- mg/dL'
-        self.glucose_bar.value  = 0
+        self.temp_text    = 'Temp: -- °C'
+        self.temp_value   = 0.0
+        self.ph_text      = 'pH:   --'
+        self.ph_value     = 0.0
+        self.glucose_text = 'Glu:  -- mg/dL'
+        self.glucose_value= 0.0
 
     def update_dashboard(self, dt):
-        """Periodic poll: update the live readings bar with the freshest data.
-
-        Queries ``sensor_interface.read_sensor_data()`` directly so the display
-        reflects whatever the Java periodic re-read last stored in
-        ``lastSensorData``, with no extra polling lag.  Falls back to the stored
-        ``sensor_data`` history when no live data is available (e.g. tag not in
-        range but a previous reading exists).
-        """
+        """Periodic (2 s) poll: update live readings bars with the freshest data."""
         live = None
         if self.sensor_interface:
             try:
@@ -265,35 +279,30 @@ class DashboardScreen(BoxLayout):
                 pass
 
         if live:
-            self._apply_reading(
-                live['temperature'], live['ph'], live['glucose'])
+            self._apply_reading(live['temperature'], live['ph'], live['glucose'])
             if not self._has_data:
                 self._has_data = True
-                self.status_label.text  = 'NHS 3152 sensor connected — live data'
-                self.status_label.color = (0.3, 1, 0.3, 1)
+                self.status_text = 'NHS 3152 sensor connected — live data'
             return
 
         # No live data — fall back to the most recent stored reading
         readings = self.sensor_data.get_all_readings()
         if readings:
             latest = readings[-1]
-            self._apply_reading(
-                latest.temperature, latest.ph, latest.glucose)
+            self._apply_reading(latest.temperature, latest.ph, latest.glucose)
             if not self._has_data:
                 self._has_data = True
-                self.status_label.text  = 'NHS 3152 sensor connected — live data'
-                self.status_label.color = (0.3, 1, 0.3, 1)
+                self.status_text = 'NHS 3152 sensor connected — live data'
         else:
             self._show_null_values()
-            self.status_label.text  = 'Waiting for NHS 3152 sensor...'
-            self.status_label.color = (1, 0.8, 0.2, 1)
+            self.status_text = 'Waiting for NHS 3152 sensor...'
 
     def _apply_reading(self, temp: float, ph: float, glucose: float) -> None:
-        """Push one set of sensor values into all live-display widgets."""
-        self.temp_label.text    = f'Temp: {temp:.1f} °C'
-        self.temp_bar.value     = max(0, min(temp, 60))
-        self.ph_label.text      = f'pH:   {ph:.2f}'
-        self.ph_bar.value       = max(0, min(ph, 14.0))
-        self.glucose_label.text = f'Glu:  {glucose:.1f} mg/dL'
-        self.glucose_bar.value  = max(0, min(glucose, 250))
+        """Push one set of sensor values into all live-display widgets via Properties."""
+        self.temp_text     = f'Temp: {temp:.1f} °C'
+        self.temp_value    = max(0.0, min(float(temp), 60.0))
+        self.ph_text       = f'pH:   {ph:.2f}'
+        self.ph_value      = max(0.0, min(float(ph), 14.0))
+        self.glucose_text  = f'Glu:  {glucose:.1f} mg/dL'
+        self.glucose_value = max(0.0, min(float(glucose), 500.0))
     

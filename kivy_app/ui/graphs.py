@@ -1,203 +1,54 @@
 """
-Graphs screen — Three simultaneous, independently-scaled line charts
-(Temperature, pH, Glucose) stacked vertically. Auto-refreshes the instant
-new sensor data arrives via the SensorData observer pattern, satisfying the
-"LiveData / StateFlow" reactive-update requirement.
+Graphs screen — Single matplotlib Figure with shared X-axis and three
+independent Y-axes (Temperature left, pH right, Glucose offset-right).
+
+Rendered with the Agg backend to a raw RGBA buffer which is uploaded to
+a Kivy Texture and displayed via an Image widget.  The figure is created
+once and redrawn in-place on every SensorData observer callback.
+
+Y-axis layout
+-------------
+ax1  (left)             — Temperature  °C   (red)
+ax2  (right)            — pH                (blue)   twinx of ax1
+ax3  (right + outward)  — Glucose  mg/dL    (green)  twinx of ax1, offset 60 pt
 """
 
-from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.label import Label
-from kivy.uix.widget import Widget
-from kivy.graphics import Color, Line, Rectangle, Ellipse
-from kivy.core.text import Label as CoreLabel
-from kivy.clock import Clock
-from datetime import datetime
+import io
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.image import Image
+from kivy.uix.label import Label
+from kivy.graphics.texture import Texture
+from kivy.properties import StringProperty
+from kivy.clock import Clock
 
 # ── Colour palette ─────────────────────────────────────────────────────────
-COLOUR_TEMP    = (1.00, 0.35, 0.35, 1)   # red
-COLOUR_PH      = (0.30, 0.70, 1.00, 1)   # blue
-COLOUR_GLUCOSE = (0.30, 0.92, 0.40, 1)   # green
-COLOUR_GRID    = (0.28, 0.28, 0.32, 1)
-COLOUR_BG      = (0.10, 0.10, 0.13, 1)
+_FIG_BG    = '#16161a'
+_AX_BG     = '#1c1c22'
+_CLR_TEMP  = '#ff5555'   # red
+_CLR_PH    = '#4db8ff'   # blue
+_CLR_GLUC  = '#4dea66'   # green
+_CLR_TICK  = '#cccccc'
+_DPI       = 80          # render DPI → balances sharpness vs render time
 
-
-def _make_texture(text, font_size=11, colour=(0.82, 0.82, 0.82, 1)):
-    """Render a short string to a Kivy texture for use inside a Canvas."""
-    lbl = CoreLabel(text=str(text), font_size=font_size, color=colour)
-    lbl.refresh()
-    return lbl.texture
-
-
-class _LineChart(Widget):
-    """Single metric line chart drawn entirely on the Kivy Canvas.
-
-    Features
-    --------
-    - Labelled Y-axis numeric tick marks (via CoreLabel textures)
-    - Labelled X-axis (first / middle / last timestamps)
-    - Independent Y scale per instance
-    - Latest-value overlay in the top-right corner
-    - Data dots thinned to ≤ 30 to avoid clutter on dense data sets
-    """
-
-    def __init__(self, title='', colour=(1, 1, 1, 1),
-                 y_min=0.0, y_max=100.0, y_unit='', **kwargs):
-        super().__init__(**kwargs)
-        self._title    = title
-        self._colour   = colour
-        self._y_min    = y_min
-        self._y_max    = y_max
-        self._y_unit   = y_unit
-        self._values   = []       # list[float]
-        self._x_labels = []       # list[str] — time string per reading
-        self.bind(size=self._redraw, pos=self._redraw)
-
-    # ── Public API ──────────────────────────────────────────────────────────
-
-    def set_readings(self, readings, attr: str):
-        """Populate chart from a list of SensorReading objects.
-
-        Parameters
-        ----------
-        readings : list[SensorReading]
-        attr     : 'temperature', 'ph', or 'glucose'
-        """
-        self._values   = [getattr(r, attr, 0.0) for r in readings]
-        self._x_labels = [
-            r.timestamp.strftime('%H:%M:%S')
-            if hasattr(r.timestamp, 'strftime') else str(r.timestamp)[:8]
-            for r in readings
-        ]
-        self._redraw()
-
-    # ── Drawing ─────────────────────────────────────────────────────────────
-
-    def _redraw(self, *_):
-        self.canvas.clear()
-
-        pad_l, pad_b, pad_r, pad_t = 56, 32, 14, 26
-        cw = self.width  - pad_l - pad_r
-        ch = self.height - pad_b - pad_t
-        if cw < 4 or ch < 4:
-            return
-
-        ox = self.x + pad_l
-        oy = self.y + pad_b
-
-        n       = len(self._values)
-        y_min   = self._y_min
-        y_max   = self._y_max
-        y_range = max(y_max - y_min, 1e-9)
-
-        with self.canvas:
-            # Background
-            Color(*COLOUR_BG)
-            Rectangle(pos=self.pos, size=self.size)
-
-            # Plot-area border
-            Color(0.36, 0.36, 0.40, 1)
-            Line(rectangle=(ox, oy, cw, ch), width=1)
-
-            # Y-axis grid lines + numeric tick labels
-            for i in range(6):
-                frac = i / 5.0
-                yy   = oy + ch * frac
-                val  = y_min + y_range * frac
-                Color(*COLOUR_GRID)
-                Line(points=[ox, yy, ox + cw, yy], width=1)
-                tex = _make_texture(f'{val:.1f}', font_size=10)
-                if tex:
-                    Color(0.80, 0.80, 0.80, 1)
-                    Rectangle(texture=tex,
-                              pos=(ox - 52, yy - 7),
-                              size=(48, 14))
-
-            # Chart title + unit (top-left)
-            title_tex = _make_texture(
-                f'{self._title}  [{self._y_unit}]',
-                font_size=12, colour=(1, 1, 1, 1))
-            if title_tex:
-                Color(1, 1, 1, 1)
-                Rectangle(texture=title_tex,
-                          pos=(ox + 4, oy + ch - 20),
-                          size=title_tex.size)
-
-            # No-data placeholder
-            if n == 0:
-                nd_tex = _make_texture(
-                    'No data — hold NHS 3152 near phone NFC antenna',
-                    font_size=11, colour=(0.50, 0.50, 0.50, 1))
-                if nd_tex:
-                    Color(0.50, 0.50, 0.50, 1)
-                    cx_ = ox + cw / 2 - nd_tex.size[0] / 2
-                    cy_ = oy + ch / 2 - nd_tex.size[1] / 2
-                    Rectangle(texture=nd_tex,
-                              pos=(cx_, cy_), size=nd_tex.size)
-                return
-
-            # Latest-value overlay (top-right)
-            lv_tex = _make_texture(
-                f'Latest: {self._values[-1]:.2f} {self._y_unit}',
-                font_size=11, colour=self._colour)
-            if lv_tex:
-                Color(*self._colour)
-                rx = ox + cw - lv_tex.size[0] - 4
-                Rectangle(texture=lv_tex,
-                          pos=(rx, oy + ch - 20),
-                          size=lv_tex.size)
-
-            if n < 2:
-                return
-
-            # Pre-compute pixel positions for the data line
-            pts = []
-            for idx, val in enumerate(self._values):
-                xx = ox + cw * idx / (n - 1)
-                clamped = max(y_min, min(y_max, val))
-                yy = oy + ch * (clamped - y_min) / y_range
-                pts.extend([xx, yy])
-
-            # Data line
-            Color(*self._colour)
-            Line(points=pts, width=1.8)
-
-            # Data dots (thinned to ≤ 30 for readability)
-            step = max(1, n // 30)
-            for idx in range(0, n, step):
-                xx = pts[idx * 2]
-                yy = pts[idx * 2 + 1]
-                Ellipse(pos=(xx - 3, yy - 3), size=(6, 6))
-
-            # X-axis time labels at first / middle / last sample
-            if self._x_labels:
-                for idx in [0, n // 2, n - 1]:
-                    if idx >= len(self._x_labels):
-                        continue
-                    xx  = ox + cw * idx / (n - 1)
-                    tex = _make_texture(self._x_labels[idx], font_size=9)
-                    if tex:
-                        Color(0.65, 0.65, 0.65, 1)
-                        tx = max(ox, min(xx - tex.size[0] / 2,
-                                         ox + cw - tex.size[0]))
-                        Rectangle(texture=tex,
-                                  pos=(tx, oy - 22),
-                                  size=tex.size)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# GraphsScreen — three simultaneous charts stacked vertically
-# ═══════════════════════════════════════════════════════════════════════════
 
 class GraphsScreen(BoxLayout):
-    """Displays three independent live line charts (Temperature / pH / Glucose)
-    stacked vertically, each with its own Y scale.
+    """Single matplotlib Figure with a shared X-axis and three independent
+    Y-axes, embedded in a Kivy Image widget as a dynamically updated texture.
 
-    Registers itself as a SensorData observer so all three charts redraw the
-    instant new data arrives — no button press required.  This satisfies the
-    requirement for a reactive immediate UI refresh within the same 2-second
-    polling window.
+    Registers itself as a SensorData observer so the chart redraws the
+    instant new sensor data arrives — no button press or polling required.
+    Uses a StringProperty for the stats bar so Kivy binding keeps the label
+    in sync without manual .text assignments elsewhere.
     """
+
+    # Kivy reactive property — bound to the stats label in __init__
+    stats_text = StringProperty(
+        'Hold NHS 3152 near phone NFC area to start plotting')
 
     def __init__(self, csv_handler, sensor_data, **kwargs):
         super().__init__(**kwargs)
@@ -208,78 +59,146 @@ class GraphsScreen(BoxLayout):
         self.csv_handler = csv_handler
         self.sensor_data = sensor_data
 
-        # ── Header ─────────────────────────────────────────────────────────
-        self.header_label = Label(
+        # ── Pre-build a persistent matplotlib figure ─────────────────────
+        # Creating once avoids the overhead of plt.subplots() on every redraw.
+        self._fig, self._ax1 = plt.subplots(
+            figsize=(7, 4.5), facecolor=_FIG_BG)
+        self._ax1.set_facecolor(_AX_BG)
+
+        # ax2 — pH, right Y-axis (shares X-axis with ax1 via twinx)
+        self._ax2 = self._ax1.twinx()
+
+        # ax3 — Glucose, second right Y-axis offset 60 pt outward
+        self._ax3 = self._ax1.twinx()
+        self._ax3.spines['right'].set_position(('outward', 60))
+
+        # ── Header label ─────────────────────────────────────────────────
+        hdr = Label(
             text='Live Sensor Charts',
             size_hint_y=None, height=28,
             bold=True, font_size='15sp')
-        self.add_widget(self.header_label)
+        self.add_widget(hdr)
 
-        # ── Three independent line charts, stacked vertically ──────────────
-        # Each chart has size_hint_y=0.29 so they fill available space equally
-        # leaving room for header and stats bar.
-        self.chart_temp = _LineChart(
-            title='Temperature', colour=COLOUR_TEMP,
-            y_min=0.0, y_max=60.0, y_unit='°C',
-            size_hint_y=0.29)
-        self.add_widget(self.chart_temp)
+        # ── Image widget — receives the rendered matplotlib texture ───────
+        self.graph_image = Image(
+            size_hint_y=1,
+            allow_stretch=True,
+            keep_ratio=True)
+        self.add_widget(self.graph_image)
 
-        self.chart_ph = _LineChart(
-            title='pH Level', colour=COLOUR_PH,
-            y_min=0.0, y_max=14.0, y_unit='pH',
-            size_hint_y=0.29)
-        self.add_widget(self.chart_ph)
-
-        self.chart_glucose = _LineChart(
-            title='Glucose', colour=COLOUR_GLUCOSE,
-            y_min=30.0, y_max=250.0, y_unit='mg/dL',
-            size_hint_y=0.29)
-        self.add_widget(self.chart_glucose)
-
-        # ── Stats summary bar ──────────────────────────────────────────────
+        # ── Stats bar driven by StringProperty ───────────────────────────
         self.stats_label = Label(
-            text='Hold NHS 3152 near phone NFC area to start plotting',
+            text=self.stats_text,
             size_hint_y=None, height=26,
             font_size='11sp', color=(0.75, 0.75, 0.75, 1))
         self.add_widget(self.stats_label)
+        self.bind(stats_text=lambda i, v: setattr(self.stats_label, 'text', v))
 
-        # ── Register as observer — charts refresh instantly on new data ────
+        # ── Register as SensorData observer ──────────────────────────────
         sensor_data.add_observer(self._on_new_reading)
 
         # Populate with any readings captured before this screen was built
         Clock.schedule_once(self._initial_load, 0)
 
-    # ── Observer callback ───────────────────────────────────────────────────
+    # ── Observer callback ────────────────────────────────────────────────────
 
     def _on_new_reading(self, _reading):
-        """Called synchronously on the Kivy main thread immediately when a
-        new reading is pushed into SensorData.  Redraws all three charts."""
-        self._refresh_all_charts()
+        """Called synchronously on the Kivy main thread when new data arrives."""
+        self._refresh_graph()
 
-    # ── Chart refresh ────────────────────────────────────────────────────────
+    # ── Graph refresh ────────────────────────────────────────────────────────
 
     def _initial_load(self, _dt):
-        self._refresh_all_charts()
+        self._refresh_graph()
 
-    def _refresh_all_charts(self):
-        """Fetch the latest readings and redraw all three line charts."""
+    def _refresh_graph(self):
+        """Redraw the matplotlib figure and upload the result as a Kivy texture."""
         readings = self.sensor_data.get_all_readings()
         if not readings:
-            self.stats_label.text = (
+            self.stats_text = (
                 'Hold NHS 3152 near phone NFC area to start plotting')
             return
 
-        # Limit to the last 100 points so rendering stays fast on Android
+        # Limit to the last 100 samples so rendering stays fast on Android
         recent = readings[-100:]
 
-        self.chart_temp.set_readings(recent, 'temperature')
-        self.chart_ph.set_readings(recent, 'ph')
-        self.chart_glucose.set_readings(recent, 'glucose')
+        times = [
+            r.timestamp.strftime('%H:%M:%S')
+            if hasattr(r.timestamp, 'strftime') else str(r.timestamp)[:8]
+            for r in recent
+        ]
+        temps = [r.temperature for r in recent]
+        phs   = [r.ph          for r in recent]
+        glucs = [r.glucose     for r in recent]
+        xs    = range(len(recent))
 
-        temps  = [r.temperature for r in recent]
-        phs    = [r.ph          for r in recent]
-        glucs  = [r.glucose     for r in recent]
-        self.stats_label.text = (
+        # ── Clear and redraw all three axes ──────────────────────────────
+        ax1, ax2, ax3 = self._ax1, self._ax2, self._ax3
+
+        for ax in (ax1, ax2, ax3):
+            ax.cla()
+            ax.set_facecolor(_AX_BG)
+            for spine in ax.spines.values():
+                spine.set_color('#444450')
+            ax.tick_params(colors=_CLR_TICK, labelsize=8)
+
+        # Temperature — left Y-axis
+        ax1.plot(xs, temps, color=_CLR_TEMP, linewidth=1.6, label='Temp °C')
+        ax1.set_ylabel('Temp (°C)', color=_CLR_TEMP, fontsize=9)
+        ax1.tick_params(axis='y', colors=_CLR_TEMP)
+        ax1.set_ylim(0, 60)
+
+        # pH — right Y-axis
+        ax2.plot(xs, phs, color=_CLR_PH, linewidth=1.6, label='pH')
+        ax2.set_ylabel('pH', color=_CLR_PH, fontsize=9)
+        ax2.tick_params(axis='y', colors=_CLR_PH)
+        ax2.spines['right'].set_color(_CLR_PH)
+        ax2.set_ylim(0, 14)
+
+        # Glucose — offset right Y-axis (+60 pt outward)
+        ax3.spines['right'].set_position(('outward', 60))
+        ax3.spines['right'].set_color(_CLR_GLUC)
+        ax3.plot(xs, glucs, color=_CLR_GLUC, linewidth=1.6, label='Glu mg/dL')
+        ax3.set_ylabel('Glucose (mg/dL)', color=_CLR_GLUC, fontsize=9)
+        ax3.tick_params(axis='y', colors=_CLR_GLUC)
+        ax3.set_ylim(0, 500)
+
+        # Shared X-axis labels (sparse — first / quarter / half / 3-quarter / last)
+        n = len(recent)
+        ticks = sorted({0, n // 4, n // 2, 3 * n // 4, n - 1})
+        ax1.set_xticks(ticks)
+        ax1.set_xticklabels([times[i] for i in ticks], rotation=20, fontsize=8)
+        ax1.tick_params(axis='x', colors=_CLR_TICK)
+
+        # Combined legend from all three axes
+        lines  = ax1.get_lines() + ax2.get_lines() + ax3.get_lines()
+        labels = [ln.get_label() for ln in lines]
+        ax1.legend(lines, labels, loc='upper left', fontsize=8,
+                   facecolor=_AX_BG, labelcolor='white', framealpha=0.6)
+
+        self._fig.suptitle(
+            'NHS 3152 Sensor — Live Readings',
+            color='white', fontsize=10, y=0.99)
+
+        # Leave right margin for the offset Glucose axis label
+        self._fig.tight_layout(rect=[0, 0.02, 0.82, 0.97])
+
+        # ── Render to raw RGBA bytes → Kivy Texture → Image widget ───────
+        buf = io.BytesIO()
+        self._fig.savefig(buf, format='raw', dpi=_DPI, facecolor=_FIG_BG)
+        buf.seek(0)
+        raw = np.frombuffer(buf.read(), dtype=np.uint8)
+
+        w = int(self._fig.get_figwidth()  * _DPI)
+        h = int(self._fig.get_figheight() * _DPI)
+        raw = raw.reshape((h, w, 4))[::-1]   # flip Y — Kivy origin is bottom-left
+
+        tex = Texture.create(size=(w, h), colorfmt='rgba')
+        tex.blit_buffer(raw.tobytes(), colorfmt='rgba', bufferfmt='ubyte')
+        self.graph_image.texture = tex
+
+        # ── Update stats bar via StringProperty ──────────────────────────
+        self.stats_text = (
             f'T: {min(temps):.1f}–{max(temps):.1f} °C  |  '
             f'pH: {min(phs):.2f}–{max(phs):.2f}  |  '
             f'Glu: {min(glucs):.0f}–{max(glucs):.0f} mg/dL  '

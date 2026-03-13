@@ -57,10 +57,26 @@ class CSVHandler:
         if storage_path:
             self.storage_path = Path(storage_path)
         else:
-            android_path = _resolve_android_storage()
-            self.storage_path = (
-                Path(android_path) if android_path else Path('./sensor_data')
-            )
+            # Priority 1: Kivy user_data_dir — maps to Android internal private
+            # storage (/data/data/<pkg>/files/), never visible to file managers,
+            # cleared only when the app is uninstalled.
+            kivy_dir = ''
+            try:
+                from kivy.app import App
+                app = App.get_running_app()
+                if app and getattr(app, 'user_data_dir', None):
+                    kivy_dir = app.user_data_dir
+            except Exception:
+                pass
+
+            if kivy_dir:
+                self.storage_path = Path(kivy_dir) / 'sensor_data'
+            else:
+                # Priority 2: Android external-files dir (accessible via USB/file manager)
+                android_path = _resolve_android_storage()
+                self.storage_path = (
+                    Path(android_path) if android_path else Path('./sensor_data')
+                )
         self.storage_path.mkdir(parents=True, exist_ok=True)
         
         # Create daily CSV file names

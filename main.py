@@ -18,7 +18,7 @@ logger = logging.getLogger('SensorMonitor')
 
 from kivy.app import App
 from kivy.core.window import Window
-Window.title = "SensorMonitor v1.04"
+Window.title = "SensorMonitor v1.06"
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.gridlayout import GridLayout
@@ -52,7 +52,7 @@ class SensorMonitorApp(App):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.title = "SensorMonitor v1.04"
+        self.title = "SensorMonitor v1.06"
         self.sensor_interface = None
         self.nfc_handler = None
         self.csv_handler = None
@@ -115,7 +115,8 @@ class SensorMonitorApp(App):
         """Initialise services and build the tabbed panel UI."""
         # Services
         self.sensor_interface = SensorInterface()
-        self.csv_handler = CSVHandler()
+        # Pass user_data_dir for internal private storage (highest priority path)
+        self.csv_handler = CSVHandler(storage_path=self.user_data_dir)
         self.sensor_data = SensorData()
         self.nfc_handler = NFCHandler(self.sensor_interface)
 
@@ -181,7 +182,7 @@ class SensorMonitorApp(App):
         Clock.schedule_once(self._initial_connect, 2)
 
         self.data_update_event = Clock.schedule_interval(
-            self.update_sensor_data, 1   # 1 s matches Java periodic re-read interval
+            self.update_sensor_data, 2   # 2 s polling interval matches Java periodic re-read
         )
 
     def _on_android_new_intent(self, intent) -> None:
