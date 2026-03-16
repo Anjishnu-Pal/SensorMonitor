@@ -29,13 +29,9 @@ def build_nhs3152_payload(temp_c: float, ph: float, glucose_mgdl: float) -> byte
     """
     Build a 6-byte NHS 3152 sensor payload.
     Matches the format documented in SensorBridge.java:
-      Bytes 0-1 : Temperature   signed int16, 0.1 °C  — big-endian (network byte order)
-      Bytes 2-3 : pH            uint16, 0.01 pH units — big-endian
-      Bytes 4-5 : Glucose       uint16, mg/dL          — big-endian
-
-    The NHS3152 firmware explicitly stores data in big-endian (network byte order)
-    for NFC interoperability, regardless of the MCU's native little-endian architecture.
-    Java's parseHealthData() therefore tries BIG_ENDIAN first.
+      Bytes 0-1 : Temperature   signed int16, 0.1 °C
+      Bytes 2-3 : pH            uint16, 0.01 pH units
+      Bytes 4-5 : Glucose       uint16, mg/dL
     """
     temp_raw    = int(round(temp_c * 10))
     ph_raw      = int(round(ph * 100))
@@ -64,12 +60,8 @@ def parse_payload_python(raw: bytes):
 
 
 def is_data_plausible(temp, ph, glucose) -> bool:
-    """Mirror of Java isDataPlausible() — accepted sensor ranges.
-    temp 0-60 °C, pH 0-14, glucose 30-500 mg/dL.
-    Lower bound of 30 mg/dL prevents accepting uninitialized NFC SRAM (all zeros).
-    Upper bound of 500 mg/dL covers extreme hyperglycemia.
-    """
-    return (0.0 <= temp <= 60.0) and (0.0 <= ph <= 14.0) and (30.0 <= glucose <= 500.0)
+    """Mirror of Java isDataPlausible() — accepted sensor ranges."""
+    return (0.0 <= temp <= 60.0) and (0.0 <= ph <= 14.0) and (30.0 <= glucose <= 250.0)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -166,7 +158,7 @@ class TestDataPlausibility(unittest.TestCase):
         self.assertFalse(is_data_plausible(37.0, 7.0, 29.9))
 
     def test_glucose_too_high(self):
-        self.assertFalse(is_data_plausible(37.0, 7.0, 501.0))
+        self.assertFalse(is_data_plausible(37.0, 7.0, 251.0))
 
     def test_temperature_negative(self):
         self.assertFalse(is_data_plausible(-1.0, 7.0, 100.0))

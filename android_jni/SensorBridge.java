@@ -267,29 +267,25 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
                 return null;
             }
 
-            // ── Try big-endian first (NHS3152 firmware stores NFC payload in
-            //    network byte order, big-endian, regardless of the MCU's native
-            //    little-endian architecture — confirmed by all test payloads) ──
-            float[] sensorData = decodeHealthBytes(data, ByteOrder.BIG_ENDIAN);
+            // ── Try little-endian first (NHS3152 native byte order) ─────────
+            float[] sensorData = decodeHealthBytes(data, ByteOrder.LITTLE_ENDIAN);
             if (sensorData != null && isDataPlausible(sensorData)) {
                 lastSensorData      = sensorData;
                 lastDataTimestampMs = System.currentTimeMillis();
-                if (nativeLibLoaded) nativeStoreSensorData(sensorData[0], sensorData[1], sensorData[2]);
                 Log.i(TAG, String.format(
-                    "Parsed (BE) — Temp: %.1f°C, pH: %.2f, Glucose: %.0f mg/dL",
+                    "Parsed (LE) — Temp: %.1f°C, pH: %.2f, Glucose: %.0f mg/dL",
                     sensorData[0], sensorData[1], sensorData[2]));
                 return sensorData;
             }
 
-            // ── Fallback: try little-endian ──────────────────────────────────
-            Log.d(TAG, "BE parse implausible, retrying with LE");
-            sensorData = decodeHealthBytes(data, ByteOrder.LITTLE_ENDIAN);
+            // ── Fallback: try big-endian ─────────────────────────────────────
+            Log.d(TAG, "LE parse implausible, retrying with BE");
+            sensorData = decodeHealthBytes(data, ByteOrder.BIG_ENDIAN);
             if (sensorData != null && isDataPlausible(sensorData)) {
                 lastSensorData      = sensorData;
                 lastDataTimestampMs = System.currentTimeMillis();
-                if (nativeLibLoaded) nativeStoreSensorData(sensorData[0], sensorData[1], sensorData[2]);
                 Log.i(TAG, String.format(
-                    "Parsed (LE) — Temp: %.1f°C, pH: %.2f, Glucose: %.0f mg/dL",
+                    "Parsed (BE) — Temp: %.1f°C, pH: %.2f, Glucose: %.0f mg/dL",
                     sensorData[0], sensorData[1], sensorData[2]));
                 return sensorData;
             }
@@ -424,8 +420,8 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
             } catch (Exception e) {
                 Log.w(TAG, "Periodic re-read unexpected error: " + e.getMessage());
             }
-        }, 1, 2, TimeUnit.SECONDS);
-        Log.i(TAG, "Periodic re-read started (2 s interval)");
+        }, 1, 1, TimeUnit.SECONDS);
+        Log.i(TAG, "Periodic re-read started (1 s interval)");
     }
 
     /** Cancel the periodic re-read task if running. */
@@ -672,13 +668,11 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
         float temp = data[0];
         float ph = data[1];
         float glucose = data[2];
-        // Accepted ranges aligned with physiological reality and test suite:
-        // temp 0-60 °C, pH 0-14, glucose 30-500 mg/dL.
-        // Lower bound of 30 mg/dL for glucose prevents accepting uninitialized
-        // NFC SRAM (all-zero payload) as valid sensor data.
-        return (temp >= 0.0f && temp <= 60.0f) &&
+        // Wide accepted ranges: temp -10 to 80 °C (allows fever/cold extremes),
+        // pH 0-14, glucose 0-500 mg/dL (covers hypo to extreme hyperglycaemia).
+        return (temp >= -10.0f && temp <= 80.0f) &&
                (ph >= 0.0f && ph <= 14.0f) &&
-               (glucose >= 30.0f && glucose <= 500.0f);
+               (glucose >= 0.0f && glucose <= 500.0f);
     }
 
     /**
@@ -755,7 +749,6 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
     private native boolean nativeTestConnection();
     private native String nativeFirmwareVersion();
     private native boolean nativeSetNFCData(byte[] nfcData);
-    private native void nativeStoreSensorData(float temp, float ph, float glucose);
 
     /**
      * Helper method to get Activity when it becomes available.
@@ -1021,11 +1014,8 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
         }
         if (tag != null) {
             Log.i(TAG, "No NDEF in intent — routing to onTagDiscovered");
-            long tsBefore = lastDataTimestampMs;
             onTagDiscovered(tag);
-            // Return true only if onTagDiscovered actually parsed new sensor data
-            // (i.e. lastDataTimestampMs was updated by parseHealthData / parseCsvSensorText).
-            return lastDataTimestampMs > tsBefore;
+            return true;
         }
 
         Log.w(TAG, "handleNfcIntent: intent had no NDEF messages and no Tag extra");
@@ -1209,11 +1199,11 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
                 String key = kv[0].trim().toLowerCase();
                 try {
                     float val = Float.parseFloat(kv[1].trim());
-                    if (key.equals("t") || key.equals("temp") || key.equals("temperature")) {
+                    if (key.startsWith("t") || key.contains("temp")) {
                         temp = val;
-                    } else if (key.equals("p") || key.equals("ph") || key.contains("ph")) {
+                    } else if (key.startsWith("p") || key.contains("ph")) {
                         ph = val;
-                    } else if (key.equals("g") || key.equals("glu") || key.equals("glucose")) {
+                    } else if (key.startsWith("g") || key.contains("glu")) {
                         glucose = val;
                     }
                 } catch (NumberFormatException ignored) {}

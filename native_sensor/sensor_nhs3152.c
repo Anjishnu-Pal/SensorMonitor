@@ -164,26 +164,6 @@ Java_com_sensormonitor_android_SensorBridge_nativeSetNFCData(
     return JNI_TRUE;
 }
 
-/* ── JNI: Store parsed sensor data (called from Java after successful parse) */
-
-/**
- * Receive the three parsed sensor values from the Java layer.
- * This keeps the native bookkeeping layer in sync with Java-parsed data so
- * nativeReadData() can re-encode and return current values.
- */
-JNIEXPORT void JNICALL
-Java_com_sensormonitor_android_SensorBridge_nativeStoreSensorData(
-        JNIEnv *env, jobject obj, jfloat temp, jfloat ph, jfloat glucose) {
-
-    last_temperature  = (float)temp - temp_offset;
-    last_ph           = (float)ph;
-    last_glucose      = (float)glucose;
-    sensor_data_valid = 1;
-
-    LOGI("Native layer updated — Temp: %.1f°C, pH: %.2f, Glucose: %.0f mg/dL",
-         (float)temp, (float)ph, (float)glucose);
-}
-
 /* ── JNI: Update Configuration ───────────────────────────────────────────── */
 
 JNIEXPORT void JNICALL

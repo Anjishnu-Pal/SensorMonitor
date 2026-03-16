@@ -6,18 +6,15 @@ package.domain = com.sensormonitor
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,java
 
-version = 1.07
+version = 1.05
 
-requirements = python3,kivy,pyjnius,matplotlib==3.5.2,numpy==1.22.3
+requirements = python3,kivy,pyjnius
 
 orientations = portrait,landscape
 fullscreen = 0
 
 # NFC Permissions for NHS 3152 communication
 android.permissions = INTERNET,NFC,ACCESS_FINE_LOCATION,WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE,ACCESS_MEDIA_LOCATION
-
-# Declare NFC as a required hardware feature (tells Play Store this app needs NFC)
-android.meta_data = android.hardware.nfc:required=true
 
 # Add Java source for SensorBridge and native C code for JNI
 android.add_src = android_jni,native_sensor

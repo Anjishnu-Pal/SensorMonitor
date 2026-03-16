@@ -18,7 +18,7 @@ logger = logging.getLogger('SensorMonitor')
 
 from kivy.app import App
 from kivy.core.window import Window
-Window.title = "SensorMonitor v1.07"
+Window.title = "SensorMonitor v1.04"
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.gridlayout import GridLayout
@@ -36,7 +36,7 @@ from android_jni.sensor_interface import SensorInterface
 from android_jni.nfc_handler import NFCHandler
 from android_jni.permission_manager import PermissionManager
 from data_management.csv_handler import CSVHandler
-from data_management.sensor_data import SensorData, SensorReading
+from data_management.sensor_data import SensorData
 
 # Detect Android platform (same pattern used across android_jni modules)
 _ANDROID = False
@@ -52,7 +52,7 @@ class SensorMonitorApp(App):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.title = "SensorMonitor v1.07"
+        self.title = "SensorMonitor v1.04"
         self.sensor_interface = None
         self.nfc_handler = None
         self.csv_handler = None
@@ -115,29 +115,9 @@ class SensorMonitorApp(App):
         """Initialise services and build the tabbed panel UI."""
         # Services
         self.sensor_interface = SensorInterface()
-        # Pass user_data_dir for internal private storage (highest priority path)
-        self.csv_handler = CSVHandler(storage_path=self.user_data_dir)
+        self.csv_handler = CSVHandler()
         self.sensor_data = SensorData()
         self.nfc_handler = NFCHandler(self.sensor_interface)
-
-        # ── Pre-populate SensorData from saved CSV BEFORE building any screen ──
-        # Must happen here — before GraphsScreen / MainScreen register their
-        # observers — so the bulk load does not trigger N redraws (one per row).
-        # Both screens use Clock.schedule_once(_initial_load, 0) which fires on
-        # the next frame and will find the data already present.
-        try:
-            for row in self.csv_handler.load_all_readings():
-                self.sensor_data.readings.append(SensorReading(
-                    timestamp=row['timestamp'],
-                    temperature=float(row['temperature']),
-                    ph=float(row['ph']),
-                    glucose=float(row['glucose']),
-                    tag_id=str(row.get('tag_id', '')),
-                ))
-            logger.info(
-                f"Pre-loaded {len(self.sensor_data.readings)} historical readings from CSV")
-        except Exception as _e:
-            logger.warning(f"Could not pre-load historical CSV readings: {_e}")
 
         # Tab panel
         main_layout = TabbedPanel()
@@ -201,7 +181,7 @@ class SensorMonitorApp(App):
         Clock.schedule_once(self._initial_connect, 2)
 
         self.data_update_event = Clock.schedule_interval(
-            self.update_sensor_data, 2   # 2 s polling interval matches Java periodic re-read
+            self.update_sensor_data, 1   # 1 s matches Java periodic re-read interval
         )
 
     def _on_android_new_intent(self, intent) -> None:

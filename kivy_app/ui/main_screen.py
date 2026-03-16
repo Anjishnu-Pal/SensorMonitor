@@ -1,98 +1,36 @@
 """
-Main screen — Historical sensor readings table using Kivy RecycleView.
+Main screen — Live sensor data table (RecyclerView equivalent).
 
-RecycleView virtualises the list so only the visible rows are instantiated,
-keeping memory use flat regardless of how many readings are stored.  Each
-row widget uses Kivy StringProperty bindings so the Kivy binding system
-propagates data changes automatically on the main thread.
+Displays the last 50 readings in a scrollable 4-column grid, newest row
+at the top.  Refreshes the instant SensorData notifies via the observer
+callback — no polling timer required.
 """
 
 from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.recycleview import RecycleView
-from kivy.uix.recycleview.views import RecycleDataViewBehavior
-from kivy.uix.recycleboxlayout import RecycleBoxLayout
+from kivy.uix.scrollview import ScrollView
 from kivy.uix.gridlayout import GridLayout
 from kivy.uix.label import Label
 from kivy.uix.button import Button
-from kivy.properties import StringProperty
 from kivy.clock import Clock
 
 # Column header names and per-column text colours for visual distinction
 _HEADERS = ['Timestamp', 'Temp (°C)', 'pH', 'Glucose (mg/dL)']
 _COL_COLOURS = [
-    (1.00, 1.00, 1.00, 1),   # timestamp  — white
+    (1.00, 1.00, 1.00, 1),   # timestamp — white
     (1.00, 0.85, 0.30, 1),   # temperature — amber
-    (0.40, 0.80, 1.00, 1),   # pH          — blue
-    (0.30, 1.00, 0.50, 1),   # glucose     — green
+    (0.40, 0.80, 1.00, 1),   # pH — blue
+    (0.30, 1.00, 0.50, 1),   # glucose — green
 ]
 _ROW_HEIGHT = 34
 
 
-class ReadingRow(RecycleDataViewBehavior, BoxLayout):
-    """Single recycled row widget displayed inside the RecycleView.
-
-    Kivy StringProperty attributes are used for all displayed values so
-    the Kivy binding system propagates RecycleView data updates safely on
-    the main thread — no manual setText() calls needed.
-    """
-
-    ts_text   = StringProperty('')
-    temp_text = StringProperty('')
-    ph_text   = StringProperty('')
-    glu_text  = StringProperty('')
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.orientation = 'horizontal'
-        self.size_hint_y = None
-        self.height = _ROW_HEIGHT
-        self.spacing = 2
-
-        self._ts_lbl  = Label(font_size='12sp', color=_COL_COLOURS[0])
-        self._tmp_lbl = Label(font_size='12sp', color=_COL_COLOURS[1])
-        self._ph_lbl  = Label(font_size='12sp', color=_COL_COLOURS[2])
-        self._glu_lbl = Label(font_size='12sp', color=_COL_COLOURS[3])
-
-        for w in (self._ts_lbl, self._tmp_lbl, self._ph_lbl, self._glu_lbl):
-            self.add_widget(w)
-
-        self.bind(ts_text=lambda i, v:   setattr(self._ts_lbl,  'text', v))
-        self.bind(temp_text=lambda i, v: setattr(self._tmp_lbl, 'text', v))
-        self.bind(ph_text=lambda i, v:   setattr(self._ph_lbl,  'text', v))
-        self.bind(glu_text=lambda i, v:  setattr(self._glu_lbl, 'text', v))
-
-    def refresh_view_attrs(self, rv, index, data):
-        """Called by RecycleView to populate a recycled row with new data."""
-        self.ts_text   = data.get('ts',   '')
-        self.temp_text = data.get('temp', '')
-        self.ph_text   = data.get('ph',   '')
-        self.glu_text  = data.get('glu',  '')
-        return super().refresh_view_attrs(rv, index, data)
-
-
-class _SensorRecycleView(RecycleView):
-    """RecycleView container pre-configured with ReadingRow and RecycleBoxLayout."""
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.viewclass = ReadingRow
-        layout = RecycleBoxLayout(
-            orientation='vertical',
-            default_size=(None, _ROW_HEIGHT),
-            default_size_hint=(1, None),
-            size_hint_y=None)
-        layout.bind(minimum_height=layout.setter('height'))
-        self.add_widget(layout)
-
-
 class MainScreen(BoxLayout):
-    """Scrollable historical-data table, observer-driven for instant updates.
+    """Scrollable live-data table, observer-driven for instant updates.
 
     Registers itself on ``sensor_data`` so every time a new reading is
     committed by the 2-second NFC polling loop (or an on-tap NFC intent),
-    the RecycleView data list is updated immediately — no separate polling
-    timer required.  RecycleView virtualisation keeps rendering fast even
-    when hundreds of readings are stored.
+    the table rebuilds immediately — satisfying the "instant update within
+    the same 2-second window" requirement without any separate polling timer.
     """
 
     def __init__(self, csv_handler, sensor_data, **kwargs):
@@ -116,17 +54,23 @@ class MainScreen(BoxLayout):
         hdr_row.add_widget(self.count_label)
         self.add_widget(hdr_row)
 
-        # ── Column headers (fixed, outside the RecycleView) ─────────────────
-        col_hdr = GridLayout(cols=4, size_hint_y=None, height=30, spacing=2)
+        # ── Column headers (fixed, outside the ScrollView) ──────────────────
+        col_hdr = GridLayout(
+            cols=4, size_hint_y=None, height=30, spacing=2)
         for h in _HEADERS:
             col_hdr.add_widget(
                 Label(text=h, bold=True, font_size='11sp',
                       color=(0.40, 0.80, 1, 1)))
         self.add_widget(col_hdr)
 
-        # ── RecycleView (virtualised, memory-efficient list) ─────────────────
-        self.rv = _SensorRecycleView(size_hint_y=1)
-        self.add_widget(self.rv)
+        # ── Scrollable data rows ────────────────────────────────────────────
+        scroll = ScrollView()
+        self.data_grid = GridLayout(
+            cols=4, spacing=2,
+            size_hint_y=None, row_default_height=_ROW_HEIGHT)
+        self.data_grid.bind(minimum_height=self.data_grid.setter('height'))
+        scroll.add_widget(self.data_grid)
+        self.add_widget(scroll)
 
         # ── Bottom action buttons ───────────────────────────────────────────
         btn_row = BoxLayout(size_hint_y=None, height=44, spacing=6)
@@ -143,9 +87,10 @@ class MainScreen(BoxLayout):
         self.add_widget(btn_row)
 
         # ── Register as observer for instant, reactive updates ───────────────
+        # Called synchronously on the Kivy main thread when add_reading() fires.
         sensor_data.add_observer(self._on_new_reading)
 
-        # Populate with any readings captured before this screen was built
+        # Populate table with any readings already captured before this screen
         Clock.schedule_once(self._rebuild_table, 0)
 
     # ── Observer callback ───────────────────────────────────────────────────
@@ -161,34 +106,37 @@ class MainScreen(BoxLayout):
     # ── Table management ─────────────────────────────────────────────────────
 
     def _rebuild_table(self, *_):
-        """Refresh RecycleView data from the current SensorData snapshot.
+        """Rebuild the data grid from the current SensorData snapshot.
 
-        Shows the last 50 readings, newest first.  Updating rv.data triggers
-        RecycleView's internal diffing — only visible rows are re-rendered.
+        Shows the last 50 readings, newest first.  Creates ~200 Labels at
+        most — fast enough on Android even at 2-second update intervals.
         """
+        self.data_grid.clear_widgets()
         readings = self.sensor_data.get_all_readings()
         self.count_label.text = f'{len(readings)} readings'
 
-        data = []
-        for reading in reversed(readings[-50:]):   # newest first
+        for reading in reversed(readings[-50:]):  # newest first
             ts_str = (
                 reading.timestamp.strftime('%H:%M:%S')
                 if hasattr(reading.timestamp, 'strftime')
                 else str(reading.timestamp)[:19]
             )
-            data.append({
-                'ts':   ts_str,
-                'temp': f'{reading.temperature:.2f}',
-                'ph':   f'{reading.ph:.3f}',
-                'glu':  f'{reading.glucose:.1f}',
-            })
-
-        self.rv.data = data
+            cells = [
+                ts_str,
+                f'{reading.temperature:.2f}',
+                f'{reading.ph:.3f}',
+                f'{reading.glucose:.1f}',
+            ]
+            for cell, colour in zip(cells, _COL_COLOURS):
+                self.data_grid.add_widget(
+                    Label(text=cell, font_size='12sp',
+                          size_hint_y=None, height=_ROW_HEIGHT,
+                          color=colour))
 
     # ── Button handlers ──────────────────────────────────────────────────────
 
     def _on_clear(self, *_):
-        """Clear in-memory readings and refresh the (now empty) RecycleView."""
+        """Clear in-memory readings and rebuild the (now empty) table."""
         self.sensor_data.clear_readings()
         self._rebuild_table()
 
