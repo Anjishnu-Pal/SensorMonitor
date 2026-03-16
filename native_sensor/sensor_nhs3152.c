@@ -44,9 +44,12 @@ static int   sensor_data_valid = 0;
 
 /**
  * Parse sensor data from a 6-byte payload.
- *   Bytes 0-1: Temperature (signed int16, 0.1 °C units)
- *   Bytes 2-3: pH          (uint16, 0.01 pH units)
- *   Bytes 4-5: Glucose     (uint16, mg/dL)
+ *   Bytes 0-1: Temperature (signed int16 LE, 0.1 °C units)
+ *   Bytes 2-3: pH          (uint16 LE, 0.01 pH units)
+ *   Bytes 4-5: Glucose     (uint16 LE, mg/dL)
+ *
+ * NHS 3152 runs on an ARM Cortex-M0+ core → data is stored in
+ * little-endian byte order (LSB first), matching Java's decodeHealthBytes().
  *
  * Returns 1 on success, 0 on failure.
  */
@@ -56,16 +59,16 @@ static int parse_sensor_payload(const unsigned char *data, int data_len,
         return 0;
     }
 
-    /* Temperature (signed 16-bit, 0.1 °C) */
-    int16_t temp_raw = (int16_t)(((unsigned)data[0] << 8) | data[1]);
+    /* Temperature (signed 16-bit LE, 0.1 °C) */
+    int16_t temp_raw = (int16_t)(((unsigned)data[1] << 8) | data[0]);
     *temp = (temp_raw / 10.0f) + temp_offset;
 
-    /* pH (unsigned 16-bit, 0.01 pH) */
-    unsigned int ph_raw = ((unsigned)data[2] << 8) | data[3];
+    /* pH (unsigned 16-bit LE, 0.01 pH) */
+    unsigned int ph_raw = ((unsigned)data[3] << 8) | data[2];
     *ph = ph_raw / 100.0f;
 
-    /* Glucose (unsigned 16-bit, mg/dL) */
-    unsigned int glu_raw = ((unsigned)data[4] << 8) | data[5];
+    /* Glucose (unsigned 16-bit LE, mg/dL) */
+    unsigned int glu_raw = ((unsigned)data[5] << 8) | data[4];
     *glucose = (float)glu_raw;
 
     return 1;
@@ -172,6 +175,27 @@ Java_com_sensormonitor_android_SensorBridge_nativeUpdateConfig(
 
     temp_offset = temp_off;
     LOGI("Temperature offset updated to %.2f", temp_offset);
+}
+
+/* ── JNI: Store Parsed Sensor Data (called from Java after NFC parse) ────── */
+
+/**
+ * Receive the calibrated sensor values already decoded by the Java NFC
+ * parsing pipeline and store them in the native globals so that
+ * nativeReadData() stays consistent with what Python sees via getSensorReading().
+ *
+ * Called by Java SensorBridge.getSensorReading() after calibration is applied.
+ */
+JNIEXPORT void JNICALL
+Java_com_sensormonitor_android_SensorBridge_nativeSetParsedData(
+        JNIEnv *env, jobject obj, jfloat temperature, jfloat ph, jfloat glucose) {
+
+    last_temperature = temperature;
+    last_ph          = ph;
+    last_glucose     = glucose;
+    sensor_data_valid = 1;
+    LOGI("Parsed sensor data stored: Temp=%.1f pH=%.2f Glucose=%.0f",
+         last_temperature, last_ph, last_glucose);
 }
 
 /* ── JNI: Calibrate ──────────────────────────────────────────────────────── */

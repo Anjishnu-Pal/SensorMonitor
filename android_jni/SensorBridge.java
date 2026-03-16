@@ -70,6 +70,12 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
     // Used by Python to determine if the tag is still in range (freshness check).
     private volatile long lastDataTimestampMs = 0;
 
+    // Calibration offsets applied to raw sensor readings in getSensorReading().
+    // Updated by updateConfig() when Python pushes new calibration values.
+    private volatile float tempOffset    = 0.0f;
+    private volatile float phOffset      = 0.0f;
+    private volatile float glucoseOffset = 0.0f;
+
     // Background scheduler for periodic re-reads while tag remains in RF field.
     private final ScheduledExecutorService scheduler =
             Executors.newSingleThreadScheduledExecutor();
@@ -198,23 +204,55 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
     }
 
     /**
-     * Get last sensor reading (thread-safe).
-     * Returns float[3]: {temperature, ph, glucose} or null if no data yet.
+     * Get last sensor reading with calibration offsets applied (thread-safe).
+     *
+     * Returns raw {@code lastSensorData} adjusted by the calibration offsets
+     * set via {@link #updateConfig}.  Always returns a fresh array so callers
+     * cannot accidentally mutate the stored data.
+     *
+     * @return float[3] {temperature °C, pH, glucose mg/dL} or null if no data yet.
      */
     public float[] getSensorReading() {
-        return lastSensorData;
+        float[] raw = lastSensorData;
+        if (raw == null) return null;
+
+        float[] calibrated = new float[]{
+            raw[0] + tempOffset,
+            raw[1] + phOffset,
+            raw[2] + glucoseOffset
+        };
+
+        // Sync calibrated values to native C layer so nativeReadData() stays accurate.
+        if (nativeLibLoaded) {
+            nativeSetParsedData(calibrated[0], calibrated[1], calibrated[2]);
+        }
+
+        return calibrated;
     }
 
     /**
      * Update sensor configuration.
+     * Extracts {@code temp_offset}, {@code ph_calibration}, and
+     * {@code glucose_calibration} from the supplied map and stores them as
+     * calibration offsets applied in {@link #getSensorReading()}.
      */
     public boolean updateConfig(Map<String, Object> config) {
         try {
             Object tempObj = config.get("temp_offset");
             if (tempObj != null) {
-                float tempOffset = Float.parseFloat(tempObj.toString());
-                nativeUpdateConfig(tempOffset);
+                tempOffset = Float.parseFloat(tempObj.toString());
+                if (nativeLibLoaded) nativeUpdateConfig(tempOffset);
             }
+            Object phObj = config.get("ph_calibration");
+            if (phObj != null) {
+                phOffset = Float.parseFloat(phObj.toString());
+            }
+            Object glucoseObj = config.get("glucose_calibration");
+            if (glucoseObj != null) {
+                glucoseOffset = Float.parseFloat(glucoseObj.toString());
+            }
+            Log.d(TAG, String.format("Calibration updated — tempOffset=%.2f phOffset=%.3f glucoseOffset=%.1f",
+                    tempOffset, phOffset, glucoseOffset));
             return true;
         } catch (Exception e) {
             Log.e(TAG, "Error updating config: " + e.getMessage());
@@ -749,6 +787,8 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
     private native boolean nativeTestConnection();
     private native String nativeFirmwareVersion();
     private native boolean nativeSetNFCData(byte[] nfcData);
+    /** Store calibrated sensor values in the native C layer for nativeReadData(). */
+    private native void nativeSetParsedData(float temperature, float ph, float glucose);
 
     /**
      * Helper method to get Activity when it becomes available.

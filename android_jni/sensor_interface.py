@@ -35,8 +35,8 @@ class SensorInterface:
             'nfc_reader_presence_check': 250,  # milliseconds
             'nfc_timeout': 3000,  # milliseconds
             'temp_offset': 0.0,
-            'ph_calibration': 7.0,
-            'glucose_calibration': 100.0,
+            'ph_calibration': 0.0,
+            'glucose_calibration': 0.0,
             'auto_detect': True,
         }
 
