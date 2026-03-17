@@ -18,7 +18,7 @@ logger = logging.getLogger('SensorMonitor')
 
 from kivy.app import App
 from kivy.core.window import Window
-Window.title = "SensorMonitor v1.04"
+Window.title = "SensorMonitor v1.09"
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.gridlayout import GridLayout
@@ -52,7 +52,7 @@ class SensorMonitorApp(App):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.title = "SensorMonitor v1.04"
+        self.title = "SensorMonitor v1.09"
         self.sensor_interface = None
         self.nfc_handler = None
         self.csv_handler = None

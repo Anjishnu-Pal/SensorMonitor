@@ -12,12 +12,12 @@ cd /workspaces/SensorMonitor
 buildozer android debug
 ```
 
-This will generate `bin/sensormonitor-1.02-debug.apk`
+This will generate `bin/sensormonitor-1.09-debug.apk`
 
 ## Step 2: Install on Device
 ```bash
 adb uninstall com.sensormonitor.sensormonitor
-adb install -r bin/sensormonitor-1.02-debug.apk
+adb install -r bin/sensormonitor-1.09-debug.apk
 ```
 
 ## Step 3: Enable ADB Debugging

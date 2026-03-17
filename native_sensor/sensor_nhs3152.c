@@ -118,16 +118,16 @@ Java_com_sensormonitor_android_SensorBridge_nativeReadData(
     /* Re-encode the stored floats back into the 6-byte wire format */
     unsigned char buf[6];
     int16_t t = (int16_t)((last_temperature - temp_offset) * 10.0f);
-    buf[0] = (unsigned char)((t >> 8) & 0xFF);
-    buf[1] = (unsigned char)( t       & 0xFF);
+    buf[0] = (unsigned char)( t       & 0xFF);
+    buf[1] = (unsigned char)((t >> 8) & 0xFF);
 
     unsigned int p = (unsigned int)(last_ph * 100.0f);
-    buf[2] = (unsigned char)((p >> 8) & 0xFF);
-    buf[3] = (unsigned char)( p       & 0xFF);
+    buf[2] = (unsigned char)( p       & 0xFF);
+    buf[3] = (unsigned char)((p >> 8) & 0xFF);
 
     unsigned int g = (unsigned int)(last_glucose);
-    buf[4] = (unsigned char)((g >> 8) & 0xFF);
-    buf[5] = (unsigned char)( g       & 0xFF);
+    buf[4] = (unsigned char)( g       & 0xFF);
+    buf[5] = (unsigned char)((g >> 8) & 0xFF);
 
     jbyteArray result = (*env)->NewByteArray(env, 6);
     if (result != NULL) {
