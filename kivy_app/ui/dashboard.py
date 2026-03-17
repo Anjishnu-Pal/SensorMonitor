@@ -182,7 +182,7 @@ class DashboardScreen(BoxLayout):
                     ts_obj = datetime.fromisoformat(ts)
                     ts = ts_obj.strftime('%Y-%m-%d  %H:%M:%S')
                 except Exception:
-                    pass
+                    ts = str(ts)  # ensure safe string representation
 
             temp    = data.get('temperature', None)
             ph      = data.get('ph', None)

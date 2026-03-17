@@ -27,6 +27,7 @@ class NFCHandler:
         self._activity = None
         self._nfc_adapter = None
         self._reader_mode_enabled = False
+        self._dispatch_initialized = False
         
     def initialize_nfc(self) -> bool:
         """
@@ -56,10 +57,15 @@ class NFCHandler:
                     self.sensor_interface.bridge._java_bridge.setActivity(self._activity)
                     logger.info("Activity set in Java SensorBridge")
 
-            # Initialise foreground dispatch (PendingIntent + IntentFilters).
-            # Must run before the first enableForegroundDispatch() call.
+            # Initialise foreground dispatch once per app lifespan.
+            if not self._dispatch_initialized:
+                if self.sensor_interface and self.sensor_interface.bridge:
+                    self.sensor_interface.bridge.initForegroundDispatch()
+                    self._dispatch_initialized = True
+
+            # Enable foreground dispatch for this resume
             if self.sensor_interface and self.sensor_interface.bridge:
-                self.sensor_interface.bridge.initForegroundDispatch()
+                self.sensor_interface.bridge.enableForegroundDispatch()
 
             # Try to connect
             if self.sensor_interface:
@@ -81,8 +87,10 @@ class NFCHandler:
     def on_android_resume(self) -> None:
         """Called when Android app resumes from background.
 
-        Calls initialize_nfc() when reader mode is not yet active, otherwise
-        re-enables foreground dispatch via the bridge directly.
+        Calls initialize_nfc() when reader mode is not yet active (first run or
+        after a full disconnect), then ensures foreground dispatch is enabled.
+        initForegroundDispatch() is guarded inside initialize_nfc() so it only
+        ever runs once per app lifespan.
         """
         logger.debug("NFCHandler.on_android_resume() called")
         if not self._reader_mode_enabled:
@@ -91,9 +99,7 @@ class NFCHandler:
             return
         # Already initialised — just re-enable foreground dispatch.
         if self.sensor_interface and self.sensor_interface.bridge:
-            bridge = self.sensor_interface.bridge
-            if bridge._java_bridge is not None:
-                bridge.enableForegroundDispatch()
+            self.sensor_interface.bridge.enableForegroundDispatch()
 
     def on_android_pause(self) -> None:
         """Called when Android app goes to background.

@@ -222,11 +222,6 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
             raw[2] + glucoseOffset
         };
 
-        // Sync calibrated values to native C layer so nativeReadData() stays accurate.
-        if (nativeLibLoaded) {
-            nativeSetParsedData(calibrated[0], calibrated[1], calibrated[2]);
-        }
-
         return calibrated;
     }
 
@@ -310,6 +305,11 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
             if (sensorData != null && isDataPlausible(sensorData)) {
                 lastSensorData      = sensorData;
                 lastDataTimestampMs = System.currentTimeMillis();
+                // Sync to C layer immediately so nativeReadData() stays accurate
+                // regardless of whether getSensorReading() is being polled.
+                if (nativeLibLoaded) {
+                    nativeSetParsedData(sensorData[0], sensorData[1], sensorData[2]);
+                }
                 Log.i(TAG, String.format(
                     "Parsed (LE) — Temp: %.1f°C, pH: %.2f, Glucose: %.0f mg/dL",
                     sensorData[0], sensorData[1], sensorData[2]));
@@ -322,6 +322,10 @@ public class SensorBridge implements NfcAdapter.ReaderCallback {
             if (sensorData != null && isDataPlausible(sensorData)) {
                 lastSensorData      = sensorData;
                 lastDataTimestampMs = System.currentTimeMillis();
+                // Sync to C layer immediately
+                if (nativeLibLoaded) {
+                    nativeSetParsedData(sensorData[0], sensorData[1], sensorData[2]);
+                }
                 Log.i(TAG, String.format(
                     "Parsed (BE) — Temp: %.1f°C, pH: %.2f, Glucose: %.0f mg/dL",
                     sensorData[0], sensorData[1], sensorData[2]));

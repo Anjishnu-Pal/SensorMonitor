@@ -14,6 +14,14 @@ from data_management.sensor_data import SensorReading
 _FIELDS = ['timestamp', 'temperature', 'ph', 'glucose', 'tag_id']
 
 
+def _safe_float(val, default=0.0):
+    """Return float(val) or default when val is empty/None/unconvertible."""
+    try:
+        return float(val) if val != "" else default
+    except (ValueError, TypeError):
+        return default
+
+
 def _resolve_android_storage() -> str:
     """Return app-private external storage path on Android.
 
@@ -156,9 +164,9 @@ class CSVHandler:
                 for row in reader:
                     readings.append({
                         'timestamp': datetime.fromisoformat(row['timestamp']),
-                        'temperature': float(row.get('temperature', 0)),
-                        'ph': float(row.get('ph', 7.0)),
-                        'glucose': float(row.get('glucose', 0)),
+                        'temperature': _safe_float(row.get('temperature'), 0.0),
+                        'ph': _safe_float(row.get('ph'), 7.0),
+                        'glucose': _safe_float(row.get('glucose'), 0.0),
                         'tag_id': row.get('tag_id', ''),
                     })
             return readings
@@ -176,9 +184,9 @@ class CSVHandler:
                     for row in reader:
                         all_readings.append({
                             'timestamp': datetime.fromisoformat(row['timestamp']),
-                            'temperature': float(row.get('temperature', 0)),
-                            'ph': float(row.get('ph', 7.0)),
-                            'glucose': float(row.get('glucose', 0)),
+                            'temperature': _safe_float(row.get('temperature'), 0.0),
+                            'ph': _safe_float(row.get('ph'), 7.0),
+                            'glucose': _safe_float(row.get('glucose'), 0.0),
                             'tag_id': row.get('tag_id', ''),
                         })
         except Exception as e:

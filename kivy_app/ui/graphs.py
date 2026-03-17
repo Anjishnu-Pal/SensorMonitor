@@ -66,7 +66,7 @@ class _LineChart(Widget):
         self._values   = [getattr(r, attr, 0.0) for r in readings]
         self._x_labels = [
             r.timestamp.strftime('%H:%M:%S')
-            if hasattr(r.timestamp, 'strftime') else str(r.timestamp)[:8]
+            if hasattr(r.timestamp, 'strftime') else str(r.timestamp)[11:19]
             for r in readings
         ]
         self._redraw()

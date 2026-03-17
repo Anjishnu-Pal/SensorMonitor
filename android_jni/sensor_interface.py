@@ -188,7 +188,12 @@ class SensorInterface:
         try:
             self.config.update(config)
             if self.bridge and self.connected and _ANDROID:
-                self.bridge.updateConfig(config)
+                from jnius import autoclass
+                HashMap = autoclass('java.util.HashMap')
+                java_map = HashMap()
+                for key, value in config.items():
+                    java_map.put(key, str(value))
+                self.bridge.updateConfig(java_map)
             return True
         except Exception as e:
             logger.error(f"Error updating configuration: {e}")

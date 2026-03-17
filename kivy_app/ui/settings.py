@@ -111,7 +111,7 @@ class SettingsScreen(BoxLayout):
 
         cal_grid.add_widget(Label(text='Storage Path:', size_hint_y=None, height=40))
         self.path_input = TextInput(
-            text='/sdcard/SensorMonitor/', multiline=False,
+            text='', multiline=False,
             size_hint_y=None, height=40)
         cal_grid.add_widget(self.path_input)
 
@@ -194,6 +194,10 @@ class SettingsScreen(BoxLayout):
 
         self.add_widget(btn_row2)
 
+        # Populate storage path from the actual csv_handler path (scoped storage)
+        if self.csv_handler:
+            self.path_input.text = self.csv_handler.get_storage_path()
+
     # ── Status helpers ────────────────────────────────────────────────────
     def _set_status(self, text, colour=(0.5, 1, 0.5, 1)):
         self.status_label.text = text
@@ -231,6 +235,7 @@ class SettingsScreen(BoxLayout):
                 try:
                     new_path.mkdir(parents=True, exist_ok=True)
                     self.csv_handler.storage_path = new_path
+                    self.csv_handler.csv_file = new_path / f"sensor_data_{self.csv_handler.current_date}.csv"
                     self.csv_handler._initialize_csv_file()
                 except Exception as path_err:
                     self._set_status_warn(f'Path not updated: {path_err}')
@@ -299,7 +304,8 @@ class SettingsScreen(BoxLayout):
             self.temp_offset_input.text = '0.0'
             self.ph_calibration_input.text = '7.0'
             self.temp_spinner.text = 'Celsius'
-            self.path_input.text = '/sdcard/SensorMonitor/'
+            self.path_input.text = (
+                self.csv_handler.get_storage_path() if self.csv_handler else '')
 
             # Reset config
             self.sensor_interface.config = {
@@ -311,6 +317,9 @@ class SettingsScreen(BoxLayout):
                 'glucose_calibration': 100.0,
                 'auto_detect': True,
             }
+
+            # Push defaults to Java/native layer so calibration offsets are cleared
+            self.sensor_interface.update_configuration(self.sensor_interface.config)
 
             self._set_status_ok('All settings reset to defaults')
         except Exception as e:
