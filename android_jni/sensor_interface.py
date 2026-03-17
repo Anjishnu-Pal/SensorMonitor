@@ -187,7 +187,7 @@ class SensorInterface:
         """Update sensor and NFC configuration."""
         try:
             self.config.update(config)
-            if self.bridge and self.connected and _ANDROID:
+            if self.bridge and _ANDROID:
                 from jnius import autoclass
                 HashMap = autoclass('java.util.HashMap')
                 java_map = HashMap()
