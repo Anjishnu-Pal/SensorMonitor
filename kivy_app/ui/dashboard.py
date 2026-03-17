@@ -279,10 +279,9 @@ class DashboardScreen(BoxLayout):
             latest = readings[-1]
             self._apply_reading(
                 latest.temperature, latest.ph, latest.glucose)
-            if not self._has_data:
-                self._has_data = True
-                self.status_label.text  = 'NHS 3152 sensor connected — live data'
-                self.status_label.color = (0.3, 1, 0.3, 1)
+            self.status_label.text  = 'Sensor out of range — showing last reading'
+            self.status_label.color = (1, 0.8, 0.2, 1)
+            self._has_data = False
         else:
             self._show_null_values()
             self.status_label.text  = 'Waiting for NHS 3152 sensor...'
